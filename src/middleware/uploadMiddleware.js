@@ -1,36 +1,23 @@
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
-
-const uploadDir = path.join(__dirname, '../../uploads');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-    cb(null, `evidence-${uniqueSuffix}${ext}`);
-  }
-});
 
 const fileFilter = (req, file, cb) => {
-  const allowedMime = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
-  if (allowedMime.includes(file.mimetype)) {
-    cb(null, true);
-  } else {
-    cb(new Error('Only JPEG, PNG, and WebP image formats are permitted for recovery evidence.'), false);
-  }
+  const allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
+  if (allowed.includes(file.mimetype)) return cb(null, true);
+  cb(new Error('Only JPEG, PNG, and WebP images are allowed.'), false);
 };
 
 const upload = multer({
-  storage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB max
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter
 });
+
+// Same as upload.single(field) but answers with a clear JSON error.
+upload.safeSingle = (field) => (req, res, next) =>
+  upload.single(field)(req, res, (err) => {
+    if (!err) return next();
+    const message = err.code === 'LIMIT_FILE_SIZE' ? 'Photo is too large (max 10 MB).' : err.message;
+    return res.status(400).json({ success: false, message });
+  });
 
 module.exports = upload;

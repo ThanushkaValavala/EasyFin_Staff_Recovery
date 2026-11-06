@@ -33,6 +33,16 @@ const recoverySessionSchema = new mongoose.Schema(
     promiseDate: { type: Date, default: null },
     visitNotes: { type: String, default: '' },
     isReportSubmitted: { type: Boolean, default: false },
+    area: { type: String, default: '' },
+    cases: [{
+      _id: false,
+      assignmentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Assignment' },
+      customerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer' },
+      loanId: { type: mongoose.Schema.Types.ObjectId, ref: 'Loan' }
+    }],
+    startSpeedometerEvidenceId: { type: String, default: '' },
+    endSpeedometerEvidenceId: { type: String, default: '' },
+    remarks: { type: String, default: '' },
     vehicleType: { type: String, default: '' },
     vehicleNumber: { type: String, default: '' },
     startLocation: { latitude: { type: Number }, longitude: { type: Number } },

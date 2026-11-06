@@ -5,6 +5,7 @@ const { protect } = require('../middleware/authMiddleware');
 
 router.get('/', protect, caseController.getAssignedCases);
 router.post('/entry', protect, caseController.createCase);
+router.get('/areas', protect, caseController.searchByArea);
 router.get('/:id', protect, caseController.getCaseDetail);
 
 module.exports = router;

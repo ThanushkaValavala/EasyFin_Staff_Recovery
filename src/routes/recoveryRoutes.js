@@ -6,6 +6,7 @@ const evidenceController = require('../controllers/evidenceController');
 
 const { protect } = require('../middleware/authMiddleware');
 const upload = require('../middleware/uploadMiddleware');
+const flow = require('../controllers/recoveryFlowController');
 
 // Recovery session routes
 router.post('/start', protect, recoverySessionController.startSession);
@@ -40,7 +41,7 @@ router.post(
 router.post(
   '/sessions/:sessionId/evidence',
   protect,
-  upload.single('photo'),
+  upload.safeSingle('photo'),
   evidenceController.uploadEvidence
 );
 
@@ -55,4 +56,8 @@ router.get(
   protect,
   recoverySessionController.getJourneyDetails
 );
+router.post('/start-with-photo', protect, upload.safeSingle('startPhoto'), flow.startWithPhoto);
+router.post('/sessions/:sessionId/finish', protect, upload.safeSingle('endPhoto'), flow.finishSession);
+router.get('/evidence/:evidenceId/image', protect, evidenceController.getEvidenceImage);
+
 module.exports = router;

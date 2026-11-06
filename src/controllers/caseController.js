@@ -344,3 +344,60 @@ exports.createCase = async (req, res) => {
     return res.status(500).json({ success: false, message: 'Could not create the case.' });
   }
 };
+
+// Area search: this staff member's cases matching an area/location, grouped by common place.
+exports.searchByArea = async (req, res) => {
+  try {
+    if (!getIsConnected()) {
+      return res.status(503).json({ success: false, message: 'Database is not connected.' });
+    }
+    const q = String(req.query.q || '').trim().toLowerCase();
+    const assignments = await Assignment.find({ staffId: req.staff._id, recoveryStatus: { $ne: 'IN_PROGRESS' } })
+      .populate('customerId')
+      .populate('loanId');
+
+    const knownAreas = [...new Set(assignments.map((a) => a.customerId && a.customerId.area).filter(Boolean))].sort();
+
+    const matches = assignments.filter((a) => {
+      const c = a.customerId;
+      const l = a.loanId;
+      if (!c || !l || l.outstandingAmount <= 0) return false;
+      if (!q) return true;
+      return [c.area, c.city, c.address, c.landmark].join(' ').toLowerCase().includes(q);
+    });
+
+    const groups = new Map();
+    matches.forEach((a) => {
+      const c = a.customerId;
+      const lm = String(c.landmark || '').trim();
+      let key;
+      let label;
+      if (lm) {
+        key = 'lm:' + lm.toLowerCase();
+        label = lm;
+      } else if (c.latitude && c.longitude) {
+        key = 'geo:' + c.latitude.toFixed(2) + ',' + c.longitude.toFixed(2);
+        label = 'Near ' + (String(c.address || '').split(',')[0].trim() || 'same location');
+      } else {
+        key = 'other';
+        label = 'Other locations';
+      }
+      if (!groups.has(key)) groups.set(key, { place: label, isOther: key === 'other', cases: [] });
+      groups.get(key).cases.push({
+        assignmentId: a.assignmentId,
+        id: a._id,
+        customer: { name: c.name, address: c.address, landmark: c.landmark, city: c.city, area: c.area },
+        loan: { loanId: a.loanId.loanId, loanType: a.loanId.loanType, loanDate: a.loanId.loanDate }
+      });
+    });
+
+    const list = [...groups.values()]
+      .map((g) => ({ place: g.place, count: g.cases.length, isOther: g.isOther, cases: g.cases }))
+      .sort((x, y) => (x.isOther - y.isOther) || (y.count - x.count));
+
+    return res.status(200).json({ success: true, query: q, total: matches.length, knownAreas, groups: list });
+  } catch (error) {
+    console.error('Area search error:', error.message);
+    return res.status(500).json({ success: false, message: 'Could not search cases by area.' });
+  }
+};
