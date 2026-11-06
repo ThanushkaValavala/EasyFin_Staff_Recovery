@@ -1,12 +1,19 @@
 import { useEffect, useState } from 'react';
 import {
-  View, Text, TouchableOpacity, StyleSheet, ScrollView,
-  ActivityIndicator, Alert,
+  View, Text, TouchableOpacity, StyleSheet, ScrollView, ActivityIndicator,
 } from 'react-native';
 import { apiGet } from '../api';
 
 const money = (n) =>
   '\u20B9' + String(Math.round(Number(n || 0))).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+
+const fmtDate = (d) => {
+  if (!d) return '-';
+  const x = new Date(d);
+  if (isNaN(x.getTime())) return '-';
+  const p = (n) => String(n).padStart(2, '0');
+  return p(x.getDate()) + '-' + p(x.getMonth() + 1) + '-' + x.getFullYear();
+};
 
 function Row({ label, value }) {
   return (
@@ -39,20 +46,13 @@ export default function CaseDetailScreen({ route, navigation }) {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={{ padding: 16 }}>
-      <View style={styles.dueBox}>
-        <Text style={styles.dueLabel}>Amount to be collected</Text>
-        <Text style={styles.dueAmount}>{money(loan.overdueAmount)}</Text>
-        <Text style={styles.dueDays}>{loan.overdueDays} days overdue</Text>
-      </View>
-
       <Text style={styles.sectionTitle}>Loan details</Text>
       <View style={styles.card}>
-        <Row label="Loan ID" value={loan.loanId} />
-        <Row label="Type" value={loan.loanType} />
-        <Row label="Total loan" value={money(loan.totalAmount)} />
-        <Row label="Outstanding" value={money(loan.outstandingAmount)} />
-        <Row label="Overdue" value={money(loan.overdueAmount)} />
-        <Row label="EMI" value={money(loan.emiAmount)} />
+        <Row label="Loan no." value={loan.loanId} />
+        <Row label="Loan date" value={fmtDate(loan.loanDate)} />
+        <Row label="Loan type" value={loan.loanType} />
+        <Row label="Pending amount" value={money(loan.outstandingAmount)} />
+        {Number(loan.penaltyAmount) > 0 ? <Row label="Penalty" value={money(loan.penaltyAmount)} /> : null}
         <Row label="Status" value={loan.status} />
       </View>
 
@@ -60,9 +60,12 @@ export default function CaseDetailScreen({ route, navigation }) {
       <View style={styles.card}>
         <Row label="Name" value={customer.name} />
         <Row label="Phone" value={customer.phone} />
+        {customer.aadhaar ? <Row label="Aadhaar" value={customer.aadhaar} /> : null}
+        {customer.dob ? <Row label="Date of birth" value={fmtDate(customer.dob)} /> : null}
+        <Row label="Area" value={customer.area || '-'} />
         <Row label="Address" value={customer.address} />
         <Row label="Landmark" value={customer.landmark || '-'} />
-        <Row label="City" value={customer.city} />
+        <Row label="City" value={customer.city || '-'} />
       </View>
 
       {item.notes ? (
@@ -86,10 +89,6 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f3f4f6' },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24 },
   error: { color: '#c00', textAlign: 'center' },
-  dueBox: { backgroundColor: '#1a56db', borderRadius: 12, padding: 20, alignItems: 'center', marginBottom: 8 },
-  dueLabel: { color: '#dbe7ff' },
-  dueAmount: { color: '#fff', fontSize: 34, fontWeight: 'bold', marginVertical: 4 },
-  dueDays: { color: '#dbe7ff' },
   sectionTitle: { fontSize: 16, fontWeight: '600', marginTop: 16, marginBottom: 8 },
   card: { backgroundColor: '#fff', borderRadius: 10, padding: 14 },
   row: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 6 },

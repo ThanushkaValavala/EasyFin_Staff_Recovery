@@ -4,6 +4,13 @@ const Loan = require('../models/Loan');
 const memoryStore = require('../services/store');
 const { getIsConnected } = require('../config/db');
 
+const maskCustomer = (c) => {
+  if (!c) return c;
+  const obj = typeof c.toObject === 'function' ? c.toObject() : { ...c };
+  if (obj.aadhaar) obj.aadhaar = 'XXXX XXXX ' + String(obj.aadhaar).slice(-4);
+  return obj;
+};
+
 exports.getAssignedCases = async (req, res) => {
   try {
     const staffId = req.staff._id.toString();
@@ -60,6 +67,7 @@ exports.getAssignedCases = async (req, res) => {
           address: a.customerId?.address,
           landmark: a.customerId?.landmark,
           city: a.customerId?.city,
+          area: a.customerId?.area,
           latitude: a.customerId?.latitude,
           longitude: a.customerId?.longitude
         },
@@ -72,7 +80,9 @@ exports.getAssignedCases = async (req, res) => {
           overdueAmount: a.loanId?.overdueAmount,
           emiAmount: a.loanId?.emiAmount,
           overdueDays: a.loanId?.overdueDays,
-          status: a.loanId?.status
+          status: a.loanId?.status,
+          loanDate: a.loanId?.loanDate,
+          penaltyAmount: a.loanId?.penaltyAmount
         }
       }));
 
@@ -177,7 +187,7 @@ exports.getCaseDetail = async (req, res) => {
           recoveryStatus: assignment.recoveryStatus,
           notes: assignment.notes,
           assignedDate: assignment.assignedDate,
-          customer: assignment.customerId,
+          customer: maskCustomer(assignment.customerId),
           loan: assignment.loanId
         }
       });
@@ -211,5 +221,126 @@ exports.getCaseDetail = async (req, res) => {
       success: false,
       message: 'Failed to retrieve case details.'
     });
+  }
+};
+const Staff = require('../models/Staff');
+
+// Admin / supervisor adds a customer + loan and assigns it to a staff member.
+exports.createCase = async (req, res) => {
+  let cust = null;
+  let ln = null;
+  try {
+    if (!['admin', 'recovery_supervisor'].includes(req.staff.role)) {
+      return res.status(403).json({ success: false, message: 'Only an admin or supervisor can add cases.' });
+    }
+    if (!getIsConnected()) {
+      return res.status(503).json({ success: false, message: 'Database is not connected.' });
+    }
+
+    const body = req.body || {};
+    const c = body.customer || {};
+    const l = body.loan || {};
+
+    const required = [c.name, c.phone, c.address, c.area, l.loanId, body.employeeId];
+    if (required.some((v) => !String(v || '').trim())) {
+      return res.status(400).json({
+        success: false,
+        message: 'employeeId, customer name, phone, address, area and loan number are required.'
+      });
+    }
+
+    const aadhaar = String(c.aadhaar || '').replace(/\D/g, '');
+    if (aadhaar && aadhaar.length !== 12) {
+      return res.status(400).json({ success: false, message: 'Aadhaar must be 12 digits.' });
+    }
+
+    const total = Number(l.totalAmount);
+    const pending = Number(l.pendingAmount !== undefined ? l.pendingAmount : l.outstandingAmount);
+    const penalty = Number(l.penaltyAmount || 0);
+    if (![total, pending, penalty].every((n) => Number.isFinite(n) && n >= 0)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Loan amount, pending amount and penalty must be valid numbers.'
+      });
+    }
+
+    const dob = c.dob ? new Date(c.dob) : null;
+    const loanDate = l.loanDate ? new Date(l.loanDate) : new Date();
+    if ((dob && isNaN(dob.getTime())) || isNaN(loanDate.getTime())) {
+      return res.status(400).json({ success: false, message: 'Invalid date of birth or loan date.' });
+    }
+
+    const staff = await Staff.findOne({
+      employeeId: String(body.employeeId).trim().toUpperCase(),
+      isActive: true
+    });
+    if (!staff) {
+      return res.status(404).json({ success: false, message: 'No active staff with that Employee ID.' });
+    }
+
+    const stamp = Date.now().toString(36).toUpperCase();
+
+    cust = await Customer.create({
+      customerId: String(c.customerId || ('CUST-' + stamp)).trim(),
+      name: String(c.name).trim(),
+      phone: String(c.phone).trim(),
+      alternatePhone: String(c.alternatePhone || '').trim(),
+      aadhaar,
+      dob,
+      address: String(c.address).trim(),
+      landmark: String(c.landmark || '').trim(),
+      city: String(c.city || '').trim(),
+      area: String(c.area).trim(),
+      latitude: Number(c.latitude) || 0,
+      longitude: Number(c.longitude) || 0
+    });
+
+    ln = await Loan.create({
+      loanId: String(l.loanId).trim().toUpperCase(),
+      customerId: cust._id,
+      loanType: String(l.loanType || 'Personal Loan').trim(),
+      loanDate,
+      totalAmount: total,
+      outstandingAmount: pending,
+      overdueAmount: pending,
+      penaltyAmount: penalty,
+      emiAmount: Number(l.emiAmount || 0),
+      overdueDays: Number(l.overdueDays || 0),
+      status: 'OVERDUE'
+    });
+
+    const priority = String(body.priority || '').toUpperCase();
+    const asg = await Assignment.create({
+      assignmentId: 'ASN-' + stamp,
+      staffId: staff._id,
+      customerId: cust._id,
+      loanId: ln._id,
+      priority: ['HIGH', 'MEDIUM', 'LOW'].includes(priority) ? priority : 'HIGH',
+      recoveryStatus: 'PENDING',
+      notes: String(body.notes || '')
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: 'Case created and assigned.',
+      case: {
+        assignmentId: asg.assignmentId,
+        customerId: cust.customerId,
+        loanId: ln.loanId,
+        assignedTo: staff.employeeId,
+        area: cust.area
+      }
+    });
+  } catch (error) {
+    if (ln) await Loan.deleteOne({ _id: ln._id }).catch(() => {});
+    if (cust) await Customer.deleteOne({ _id: cust._id }).catch(() => {});
+    if (error && error.code === 11000) {
+      return res.status(409).json({ success: false, message: 'This customer ID or loan number already exists.' });
+    }
+    if (error && error.name === 'ValidationError') {
+      return res.status(400).json({ success: false, message: error.message });
+    }
+    console.error('Create case error:', error);
+    return res.status(500).json({ success: false, message: 'Could not create the case.' });
   }
 };

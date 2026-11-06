@@ -44,10 +44,12 @@ const pickLocation = (loc) => {
 const validateCompletion = async ({ sessionId, staffId, paymentAmount, visitNotes }) => {
   let session;
   let evidenceCount;
+  let hasSpeedometer = false;
 
   if (getIsConnected()) {
     session = await RecoverySession.findOne({ sessionId, staffId });
     evidenceCount = await Evidence.countDocuments({ sessionId, staffId });
+    hasSpeedometer = (await Evidence.countDocuments({ sessionId, staffId, caption: /^Speedometer/i })) > 0;
   } else {
     await memoryStore.initDefaults();
     session = memoryStore.sessions.find(
@@ -56,10 +58,17 @@ const validateCompletion = async ({ sessionId, staffId, paymentAmount, visitNote
     evidenceCount = memoryStore.evidences.filter(
       e => e.sessionId === sessionId && e.staffId === staffId
     ).length;
+    hasSpeedometer = memoryStore.evidences.some(
+      e => e.sessionId === sessionId && e.staffId === staffId && /^Speedometer/i.test(e.caption || '')
+    );
   }
 
   // Unknown session: the controller will answer with its own 404.
   if (!session) return null;
+
+  if (!hasSpeedometer) {
+    return 'A speedometer photo must be uploaded when the recovery starts.';
+  }
 
   if (evidenceCount < 1) {
     return 'A camera photo is required as proof before completing the recovery.';
@@ -77,8 +86,8 @@ const validateCompletion = async ({ sessionId, staffId, paymentAmount, visitNote
     visitNotes !== undefined ? visitNotes : session.visitNotes || ''
   ).trim();
 
-  if (amount === 0 && !notes) {
-    return 'Remarks are required when no payment was collected.';
+  if (!notes) {
+    return 'Remarks are required.';
   }
 
   return null;

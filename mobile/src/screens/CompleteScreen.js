@@ -61,7 +61,7 @@ export default function CompleteScreen({ route, navigation }) {
   };
 
   const amountNum = Number(amount);
-  const detailsOk = paid === 'yes' ? amountNum > 0 : paid === 'no' ? notes.trim().length >= 3 : false;
+  const detailsOk = (paid === 'yes' ? amountNum > 0 : paid === 'no') && notes.trim().length >= 3;
   const canSubmit = !!photo && detailsOk && !submitting;
 
   const submit = async () => {
@@ -154,7 +154,7 @@ export default function CompleteScreen({ route, navigation }) {
             </View>
           ) : null}
 
-          {paid === 'no' ? (
+          {paid ? (
             <View>
               <Text style={styles.label}>Remarks (required)</Text>
               <TextInput
@@ -162,7 +162,7 @@ export default function CompleteScreen({ route, navigation }) {
                 multiline
                 value={notes}
                 onChangeText={setNotes}
-                placeholder="Why was payment not made?"
+                placeholder={paid === 'yes' ? 'Remarks about this visit' : 'Why was payment not made?'}
               />
             </View>
           ) : null}

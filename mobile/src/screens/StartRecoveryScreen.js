@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
-  ScrollView, ActivityIndicator,
+  ScrollView, ActivityIndicator, Image,
 } from 'react-native';
 import * as Location from 'expo-location';
-import { apiPost } from '../api';
+import * as ImagePicker from 'expo-image-picker';
+import { apiPost, apiUpload } from '../api';
 
 const TYPES = [
   { key: 'BIKE', label: 'Bike' },
@@ -18,8 +19,22 @@ export default function StartRecoveryScreen({ route, navigation }) {
   const { caseId, customer, loan } = route.params;
   const [vehicleType, setVehicleType] = useState('');
   const [vehicleNumber, setVehicleNumber] = useState('');
+  const [photo, setPhoto] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+
+  const takeSpeedometer = async () => {
+    const perm = await ImagePicker.requestCameraPermissionsAsync();
+    if (!perm.granted) {
+      setError('Camera permission is needed to take the speedometer photo.');
+      return;
+    }
+    const r = await ImagePicker.launchCameraAsync({ quality: 0.6 });
+    if (!r.canceled && r.assets && r.assets[0] && r.assets[0].uri) {
+      setPhoto(r.assets[0].uri);
+      setError('');
+    }
+  };
 
   const start = async () => {
     setError('');
@@ -30,6 +45,10 @@ export default function StartRecoveryScreen({ route, navigation }) {
     }
     if (vehicleNumber.replace(/[\s-]/g, '').length < 6) {
       setError('Enter the vehicle number (for example KA01AB1234).');
+      return;
+    }
+    if (!photo) {
+      setError('Take a photo of the speedometer before starting.');
       return;
     }
 
@@ -59,6 +78,17 @@ export default function StartRecoveryScreen({ route, navigation }) {
         initialLocation,
       });
 
+      const sessionId = data.session.sessionId || data.session._id;
+      await apiUpload(
+        '/recovery/sessions/' + sessionId + '/evidence',
+        {
+          caption: 'Speedometer (start)',
+          latitude: initialLocation.latitude,
+          longitude: initialLocation.longitude,
+        },
+        photo
+      );
+
       navigation.replace('ActiveRecovery', {
         session: data.session,
         caseId,
@@ -69,8 +99,8 @@ export default function StartRecoveryScreen({ route, navigation }) {
     } catch (e) {
       setError(
         e.message === 'Network request failed'
-          ? 'Cannot reach the server. Check Wi-Fi and the address in config.js.'
-          : e.message
+          ? 'Cannot reach the server. Check your internet.'
+          : e.message + ' Tap Start Recovery again to retry.'
       );
     } finally {
       setLoading(false);
@@ -78,9 +108,9 @@ export default function StartRecoveryScreen({ route, navigation }) {
   };
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={{ padding: 16 }}>
+    <ScrollView style={styles.container} contentContainerStyle={{ padding: 16 }} keyboardShouldPersistTaps="handled">
       <Text style={styles.customer}>{customer.name}</Text>
-      <Text style={styles.loan}>{loan.loanId}</Text>
+      <Text style={styles.loan}>Loan no: {loan.loanId}</Text>
 
       <Text style={styles.label}>Type of vehicle</Text>
       <View style={styles.chips}>
@@ -107,6 +137,12 @@ export default function StartRecoveryScreen({ route, navigation }) {
         value={vehicleNumber}
         onChangeText={setVehicleNumber}
       />
+
+      <Text style={styles.label}>Speedometer photo (required)</Text>
+      {photo ? <Image source={{ uri: photo }} style={styles.photo} /> : null}
+      <TouchableOpacity style={styles.camBtn} onPress={takeSpeedometer}>
+        <Text style={styles.camText}>{photo ? 'Retake speedometer photo' : 'Take speedometer photo'}</Text>
+      </TouchableOpacity>
 
       {error ? <Text style={styles.error}>{error}</Text> : null}
 
@@ -141,6 +177,9 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: '#ccc', backgroundColor: '#fff',
     borderRadius: 8, padding: 14, fontSize: 16,
   },
+  photo: { width: '100%', height: 200, borderRadius: 10, marginBottom: 10 },
+  camBtn: { backgroundColor: '#1a56db', padding: 14, borderRadius: 10, alignItems: 'center' },
+  camText: { color: '#fff', fontSize: 16, fontWeight: '700' },
   error: { color: '#c00', marginTop: 12 },
   button: {
     backgroundColor: '#15803d', padding: 16, borderRadius: 10,
