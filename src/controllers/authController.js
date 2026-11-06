@@ -186,3 +186,40 @@ exports.getProfile = async (req, res) => {
     staff: req.staff
   });
 };
+// Sign up: requires SIGNUP_CODE (set in Render Environment). Role is always field_officer.
+exports.register = async (req, res) => {
+  try {
+    const { employeeId, name, email, phone, assignedArea, password, signupCode } = req.body;
+
+    if (!process.env.SIGNUP_CODE || signupCode !== process.env.SIGNUP_CODE) {
+      return res.status(403).json({ success: false, message: 'Invalid sign-up code.' });
+    }
+    if (!employeeId || !name || !email || !phone || !assignedArea || !password) {
+      return res.status(400).json({ success: false, message: 'All fields are required.' });
+    }
+    if (String(password).length < 8) {
+      return res.status(400).json({ success: false, message: 'Password must be at least 8 characters.' });
+    }
+    if (!getIsConnected()) {
+      return res.status(503).json({ success: false, message: 'Database not connected.' });
+    }
+
+    await Staff.create({
+      employeeId: String(employeeId).trim().toUpperCase(),
+      name: String(name).trim(),
+      email: String(email).trim().toLowerCase(),
+      phone: String(phone).trim(),
+      assignedArea: String(assignedArea).trim(),
+      role: 'field_officer',
+      password,
+      isActive: true
+    });
+
+    return res.status(201).json({ success: true, message: 'Account created. You can log in now.' });
+  } catch (e) {
+    if (e.code === 11000) {
+      return res.status(409).json({ success: false, message: 'Employee ID or email already exists.' });
+    }
+    return res.status(500).json({ success: false, message: 'Could not create account.' });
+  }
+};

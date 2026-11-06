@@ -90,6 +90,9 @@ export default function LoginScreen({ navigation }) {
               <Text style={styles.primaryBtnText}>Login</Text>
             )}
           </TouchableOpacity>
+          <TouchableOpacity style={styles.linkBtn} onPress={() => navigation.navigate('SignUp')}>
+            <Text style={styles.linkText}>New staff? Sign up</Text>
+          </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -109,6 +112,8 @@ const styles = StyleSheet.create({
   inputIcon: { marginRight: 12 },
   input: { flex: 1, fontSize: 16, color: '#0F172A', fontWeight: '500' },
   primaryBtn: { backgroundColor: '#2563EB', height: 56, borderRadius: 12, justifyContent: 'center', alignItems: 'center', shadowColor: '#2563EB', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 8, elevation: 4 },
+  linkBtn: { marginTop: 20, alignItems: 'center' },
+  linkText: { color: '#2563EB', fontSize: 14, fontWeight: '600' },
   primaryBtnText: { color: '#fff', fontSize: 16, fontWeight: '700' },
   errorBox: { backgroundColor: '#FEF2F2', padding: 12, borderRadius: 8, marginBottom: 16, borderWidth: 1, borderColor: '#FCA5A5' },
   errorText: { color: '#DC2626', fontSize: 13, fontWeight: '500', textAlign: 'center' },

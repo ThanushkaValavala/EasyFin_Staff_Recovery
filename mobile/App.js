@@ -5,6 +5,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 
 import LoginScreen from './src/screens/LoginScreen';
+import SignUpScreen from './src/screens/SignUpScreen';
 import DashboardScreen from './src/screens/DashboardScreen';
 import CasesListScreen from './src/screens/CasesListScreen';
 import ProfileScreen from './src/screens/ProfileScreen';
@@ -46,6 +47,7 @@ export default function App() {
       <NavigationContainer>
         <Stack.Navigator initialRouteName="Login">
           <Stack.Screen name="Login" component={LoginScreen} options={{ headerShown: false }} />
+          <Stack.Screen name="SignUp" component={SignUpScreen} options={{ title: 'Sign up' }} />
           <Stack.Screen name="MainTabs" component={MainTabs} options={{ headerShown: false }} />
           <Stack.Screen name="CaseDetail" component={CaseDetailScreen} options={{ title: 'Case details' }} />
           <Stack.Screen name="StartRecovery" component={StartRecoveryScreen} options={{ title: 'Start recovery' }} />
