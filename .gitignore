@@ -7,3 +7,5 @@ coverage/
 npm-debug.log*
 .claude/
 uploads/
+
+*.bak

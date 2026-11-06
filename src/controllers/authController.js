@@ -1,23 +1,9 @@
-
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
-const crypto = require('crypto');
 const Staff = require('../models/Staff');
 const memoryStore = require('../services/store');
-const { sendOtpSms } = require('../services/smsService');
 const { getIsConnected } = require('../config/db');
-
-const otpStore = new Map();
-
-const normalizePhone = (phone) => {
-  let digits = String(phone || '').replace(/\D/g, '');
-
-  if (digits.length === 12 && digits.startsWith('91')) {
-    digits = digits.slice(2);
-  }
-
-  return digits;
-};
+const { generateStrongPassword } = require('../services/passwordGenerator');
 
 const generateToken = (staff) => {
   const secret = process.env.JWT_SECRET;
@@ -38,172 +24,14 @@ const generateToken = (staff) => {
   );
 };
 
-const findStaffByPhone = async (phone) => {
-  const normalizedPhone = normalizePhone(phone);
-
-  if (getIsConnected()) {
-    const staffList = await Staff.find({ isActive: true });
-
-    return staffList.find(
-      staff => normalizePhone(staff.phone) === normalizedPhone
-    );
-  }
-
-  await memoryStore.initDefaults();
-
-  return memoryStore.staffList.find(
-    staff =>
-      staff.isActive &&
-      normalizePhone(staff.phone) === normalizedPhone
-  );
+const toSafeStaff = (staff) => {
+  if (typeof staff.toJSON === 'function') return staff.toJSON();
+  const safeStaff = { ...staff };
+  delete safeStaff.password;
+  return safeStaff;
 };
 
-// STEP 1: Generate demo OTP
-exports.sendOtp = async (req, res) => {
-  try {
-    const phone = normalizePhone(req.body.phone);
-
-    if (!/^[6-9]\d{9}$/.test(phone)) {
-          try {
-      const result = await sendOtpSms(phone, otp);
-
-      return res.status(200).json({
-        success: true,
-        message: result.sent
-          ? 'OTP sent to your mobile number.'
-          : 'Demo OTP generated successfully.',
-        // The OTP is only returned in demo mode, never when a real SMS was sent
-        ...(result.demo ? { demoOtp: otp } : {})
-      });
-    } catch (smsError) {
-      otpStore.delete(phone);
-      console.error('SMS error:', smsError.message);
-
-      return res.status(502).json({
-        success: false,
-        message: 'Could not send the OTP SMS. Please try again.'
-      });
-    }
-    }
-
-    const staff = await findStaffByPhone(phone);
-
-        if (!staff) {
-      return res.status(403).json({
-        success: false,
-        message: 'Access denied. This number is not registered as recovery staff.'
-      });
-    }
-
-    const otp = crypto.randomInt(100000, 1000000).toString();
-
-    otpStore.set(phone, {
-      otp,
-      expiresAt: Date.now() + 5 * 60 * 1000,
-      attempts: 0
-    });
-
-    // DEMO ONLY: OTP is returned so the app can display it.
-    return res.status(200).json({
-      success: true,
-      message: 'Demo OTP generated successfully.',
-      demoOtp: otp
-    });
-  } catch (error) {
-    console.error('Send OTP error:', error);
-
-    return res.status(500).json({
-      success: false,
-      message: 'Unable to generate OTP.'
-    });
-  }
-};
-
-// STEP 2: Verify OTP and issue JWT
-exports.verifyOtp = async (req, res) => {
-  try {
-    const phone = normalizePhone(req.body.phone);
-    const otp = String(req.body.otp || '').trim();
-
-    if (!/^[6-9]\d{9}$/.test(phone) || !/^\d{6}$/.test(otp)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid mobile number or OTP.'
-      });
-    }
-
-    const savedOtp = otpStore.get(phone);
-
-    if (!savedOtp) {
-      return res.status(400).json({
-        success: false,
-        message: 'Please request a new OTP.'
-      });
-    }
-
-    if (Date.now() > savedOtp.expiresAt) {
-      otpStore.delete(phone);
-
-      return res.status(400).json({
-        success: false,
-        message: 'OTP expired. Please request a new OTP.'
-      });
-    }
-
-    savedOtp.attempts += 1;
-
-    if (savedOtp.attempts > 5) {
-      otpStore.delete(phone);
-
-      return res.status(429).json({
-        success: false,
-        message: 'Too many incorrect attempts. Request a new OTP.'
-      });
-    }
-
-    if (savedOtp.otp !== otp) {
-      return res.status(401).json({
-        success: false,
-        message: 'Incorrect OTP. Please try again.'
-      });
-    }
-
-    otpStore.delete(phone);
-
-    const staff = await findStaffByPhone(phone);
-
-    if (!staff) {
-      return res.status(404).json({
-        success: false,
-        message: 'Staff account not found or inactive.'
-      });
-    }
-
-    const token = generateToken(staff);
-
-    return res.status(200).json({
-      success: true,
-      message: 'Login successful.',
-      token,
-      staff: typeof staff.toJSON === 'function'
-        ? staff.toJSON()
-        : (() => {
-            const safeStaff = { ...staff };
-            delete safeStaff.password;
-            return safeStaff;
-          })()
-    });
-  } catch (error) {
-    console.error('Verify OTP error:', error);
-
-    return res.status(500).json({
-      success: false,
-      message: 'OTP verification failed.'
-    });
-  }
-};
-
-// Existing password login retained
+// Password login: Employee ID or email + password
 exports.login = async (req, res) => {
   try {
     const { identifier, password } = req.body;
@@ -215,7 +43,7 @@ exports.login = async (req, res) => {
       });
     }
 
-    const trimmed = identifier.trim().toLowerCase();
+    const trimmed = String(identifier).trim().toLowerCase();
     let staff;
 
     if (getIsConnected()) {
@@ -269,13 +97,7 @@ exports.login = async (req, res) => {
       success: true,
       message: 'Authentication successful.',
       token: generateToken(staff),
-      staff: typeof staff.toJSON === 'function'
-        ? staff.toJSON()
-        : (() => {
-            const safeStaff = { ...staff };
-            delete safeStaff.password;
-            return safeStaff;
-          })()
+      staff: toSafeStaff(staff)
     });
   } catch (error) {
     console.error('Login error:', error);
@@ -283,6 +105,77 @@ exports.login = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Authentication failed.'
+    });
+  }
+};
+
+// Admin / supervisor creates a staff user. Password is auto-generated and shown once.
+exports.createStaff = async (req, res) => {
+  try {
+    if (!['admin', 'recovery_supervisor'].includes(req.staff.role)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Only an admin or supervisor can create staff users.'
+      });
+    }
+
+    if (!getIsConnected()) {
+      return res.status(503).json({
+        success: false,
+        message: 'Database is not connected. Cannot create users right now.'
+      });
+    }
+
+    const { employeeId, name, email, phone, assignedArea, role } = req.body;
+
+    if (!employeeId || !name || !email || !phone || !assignedArea) {
+      return res.status(400).json({
+        success: false,
+        message: 'employeeId, name, email, phone and assignedArea are required.'
+      });
+    }
+
+    let newRole = 'field_officer';
+    if (role && role !== 'field_officer') {
+      if (req.staff.role !== 'admin' || !['recovery_supervisor', 'admin'].includes(role)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Only an admin can create supervisor or admin users.'
+        });
+      }
+      newRole = role;
+    }
+
+    const generatedPassword = generateStrongPassword();
+
+    const staff = await Staff.create({
+      employeeId: String(employeeId).trim().toUpperCase(),
+      name: String(name).trim(),
+      email: String(email).trim().toLowerCase(),
+      phone: String(phone).trim(),
+      assignedArea: String(assignedArea).trim(),
+      role: newRole,
+      password: generatedPassword,
+      isActive: true
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: 'Staff created. Share this password securely. It will not be shown again.',
+      staff: staff.toJSON(),
+      generatedPassword
+    });
+  } catch (error) {
+    if (error && error.code === 11000) {
+      return res.status(409).json({
+        success: false,
+        message: 'A staff member with this Employee ID or email already exists.'
+      });
+    }
+    console.error('Create staff error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Could not create staff user.'
     });
   }
 };

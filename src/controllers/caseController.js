@@ -10,10 +10,8 @@ exports.getAssignedCases = async (req, res) => {
     const { search, status, priority } = req.query;
 
     if (getIsConnected()) {
+      // We only query by staff and priority. We will filter by status manually below.
       let query = { staffId };
-      if (status && status !== 'ALL') {
-        query.recoveryStatus = status;
-      }
       if (priority && priority !== 'ALL') {
         query.priority = priority;
       }
@@ -22,6 +20,28 @@ exports.getAssignedCases = async (req, res) => {
         .populate('customerId')
         .populate('loanId')
         .sort({ priority: 1, assignedDate: -1 });
+
+      // DYNAMIC FILTERING based on Loan Balance, not text status
+      if (status && status !== 'ALL') {
+        assignments = assignments.filter(a => {
+          const loan = a.loanId;
+          const outstanding = loan ? loan.outstandingAmount : 0;
+          const total = loan ? loan.totalAmount : 0;
+
+          if (status === 'COMPLETED') {
+            return outstanding <= 0; // Fully paid
+          } else if (status === 'PARTIALLY_RECOVERED') {
+            return outstanding > 0 && outstanding < total; // Partially paid
+          } else if (status === 'PENDING') {
+            return outstanding === total || ['PENDING', 'FOLLOW_UP_REQUIRED', 'PAYMENT_PROMISED'].includes(a.recoveryStatus);
+          } else if (status === 'TODAY') {
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            return new Date(a.assignedDate) >= today;
+          }
+          return true;
+        });
+      }
 
       let cases = assignments.map(a => ({
         assignmentId: a.assignmentId,
@@ -71,9 +91,6 @@ exports.getAssignedCases = async (req, res) => {
       await memoryStore.initDefaults();
       let assignments = memoryStore.assignments.filter(a => a.staffId === staffId);
 
-      if (status && status !== 'ALL') {
-        assignments = assignments.filter(a => a.recoveryStatus === status);
-      }
       if (priority && priority !== 'ALL') {
         assignments = assignments.filter(a => a.priority === priority);
       }
@@ -93,6 +110,23 @@ exports.getAssignedCases = async (req, res) => {
           loan
         };
       });
+
+      if (status && status !== 'ALL') {
+        cases = cases.filter(c => {
+          const outstanding = c.loan ? c.loan.outstandingAmount : 0;
+          const total = c.loan ? c.loan.totalAmount : 0;
+
+          if (status === 'COMPLETED') return outstanding <= 0;
+          if (status === 'PARTIALLY_RECOVERED') return outstanding > 0 && outstanding < total;
+          if (status === 'PENDING') return outstanding === total || ['PENDING', 'FOLLOW_UP_REQUIRED', 'PAYMENT_PROMISED'].includes(c.recoveryStatus);
+          if (status === 'TODAY') {
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            return new Date(c.assignedDate) >= today;
+          }
+          return true;
+        });
+      }
 
       if (search && search.trim() !== '') {
         const q = search.trim().toLowerCase();

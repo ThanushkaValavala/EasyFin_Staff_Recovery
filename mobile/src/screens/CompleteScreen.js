@@ -75,6 +75,8 @@ export default function CompleteScreen({ route, navigation }) {
         );
         uploaded.current = true;
       }
+      
+      // 1. End the session
       await apiPost(`/recovery/sessions/${sessionId}/end`, {
         outcome: paid === 'yes' ? 'PAYMENT_COLLECTED' : 'FOLLOW_UP_REQUIRED',
         visitNotes: notes.trim(),
@@ -87,9 +89,22 @@ export default function CompleteScreen({ route, navigation }) {
           accuracy: endLocation.accuracy || 0,
         },
       });
+
+      // 2. Submit the actual report to update dashboard money
+      await apiPost(`/reports`, {
+        sessionId,
+        outcome: paid === 'yes' ? 'PAYMENT_COLLECTED' : 'FOLLOW_UP_REQUIRED',
+        visitNotes: notes.trim(),
+        paymentAmount: paid === 'yes' ? amountNum : 0,
+        durationSeconds: Math.round(durationSeconds),
+        distanceMeters: Math.round(dist),
+        placesVisited: [],
+        evidence: []
+      });
+
       done.current = true;
       Alert.alert('Submitted', 'Recovery saved.', [
-        { text: 'OK', onPress: () => navigation.reset({ index: 0, routes: [{ name: 'Dashboard' }] }) },
+        { text: 'OK', onPress: () => navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] }) },
       ]);
     } catch (e) {
       Alert.alert('Could not submit', e.message || 'Try again.');

@@ -19,7 +19,7 @@ const protect = async (req, res, next) => {
   }
 
   try {
-    const secret = process.env.JWT_SECRET || 'super_secret_jwt_key_easyfin_recovery_2026_secure';
+    const secret = process.env.JWT_SECRET;
     const decoded = jwt.verify(token, secret);
 
     if (getIsConnected()) {

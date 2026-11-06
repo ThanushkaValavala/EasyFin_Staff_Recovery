@@ -1,50 +1,35 @@
 import { useState } from 'react';
 import {
-  View, Text, TextInput, TouchableOpacity, Modal,
-  ActivityIndicator, StyleSheet,
+  View, Text, TextInput, TouchableOpacity,
+  ActivityIndicator, StyleSheet, KeyboardAvoidingView, Platform
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
 import { apiPost } from '../api';
 
 export default function LoginScreen({ navigation }) {
-  const [phone, setPhone] = useState('');
-  const [otp, setOtp] = useState('');
-  const [demoOtp, setDemoOtp] = useState('');
-  const [step, setStep] = useState('phone'); // 'phone' or 'otp'
-  const [showPopup, setShowPopup] = useState(false);
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
   const showError = (e) =>
-    setError(
-      e.message === 'Network request failed'
-        ? 'Cannot reach the server. Check Wi-Fi and the address in config.js.'
-        : e.message
-    );
+    setError(e.message === 'Network request failed' ? 'Cannot reach the server. Check your internet.' : e.message);
 
-  const sendOtp = async () => {
+  const login = async () => {
     setError('');
-    setLoading(true);
-    try {
-      const data = await apiPost('/auth/send-otp', { phone });
-      setDemoOtp(data.demoOtp || '');
-      setStep('otp');
-      if (data.demoOtp) setShowPopup(true);
-    } catch (e) {
-      showError(e);
-    } finally {
-      setLoading(false);
+    if (!username.trim() || !password) {
+      setError('Enter Employee ID or email and password.');
+      return;
     }
-  };
-
-  const verifyOtp = async () => {
-    setError('');
     setLoading(true);
     try {
-      const data = await apiPost('/auth/verify-otp', { phone, otp });
+      const data = await apiPost('/auth/login', { identifier: username.trim(), password });
       await SecureStore.setItemAsync('token', data.token);
       await SecureStore.setItemAsync('staff', JSON.stringify(data.staff));
-      navigation.replace('Dashboard');
+      navigation.replace('MainTabs');
     } catch (e) {
       showError(e);
     } finally {
@@ -53,81 +38,78 @@ export default function LoginScreen({ navigation }) {
   };
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>EasyFin Recovery</Text>
-      <Text style={styles.subtitle}>Staff login</Text>
+    <SafeAreaView style={styles.safeArea}>
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.container}>
 
-      <TextInput
-        style={styles.input}
-        placeholder="Mobile number"
-        keyboardType="phone-pad"
-        maxLength={10}
-        value={phone}
-        onChangeText={setPhone}
-        editable={step === 'phone'}
-      />
+        <View style={styles.headerContainer}>
+          <View style={styles.logoBox}>
+            <Ionicons name="shield-checkmark" size={36} color="#fff" />
+          </View>
+          <Text style={styles.title}>EasyFin Recovery</Text>
+          <Text style={styles.subtitle}>Staff Portal</Text>
+        </View>
 
-      {step === 'otp' && (
-        <TextInput
-          style={styles.input}
-          placeholder="Enter 6-digit OTP"
-          keyboardType="number-pad"
-          maxLength={6}
-          value={otp}
-          onChangeText={setOtp}
-        />
-      )}
+        <View style={styles.formContainer}>
+          <Text style={styles.label}>Employee ID / Email</Text>
+          <View style={styles.inputWrapper}>
+            <Ionicons name="person-outline" size={20} color="#64748B" style={styles.inputIcon} />
+            <TextInput
+              style={styles.input}
+              placeholder="Employee ID or email"
+              placeholderTextColor="#94A3B8"
+              autoCapitalize="none"
+              autoCorrect={false}
+              value={username}
+              onChangeText={setUsername}
+            />
+          </View>
 
-      {error ? <Text style={styles.error}>{error}</Text> : null}
-
-      <TouchableOpacity
-        style={styles.button}
-        onPress={step === 'phone' ? sendOtp : verifyOtp}
-        disabled={loading}
-      >
-        {loading ? (
-          <ActivityIndicator color="#fff" />
-        ) : (
-          <Text style={styles.buttonText}>
-            {step === 'phone' ? 'Send OTP' : 'Verify & Login'}
-          </Text>
-        )}
-      </TouchableOpacity>
-
-      {step === 'otp' && (
-        <TouchableOpacity onPress={() => { setStep('phone'); setOtp(''); setError(''); }}>
-          <Text style={styles.link}>Change number</Text>
-        </TouchableOpacity>
-      )}
-
-      <Modal visible={showPopup} transparent animationType="fade">
-        <View style={styles.overlay}>
-          <View style={styles.popup}>
-            <Text style={styles.popupTitle}>Your OTP</Text>
-            <Text style={styles.popupOtp}>{demoOtp}</Text>
-            <Text style={styles.popupNote}>Valid for 5 minutes</Text>
-            <TouchableOpacity style={styles.button} onPress={() => setShowPopup(false)}>
-              <Text style={styles.buttonText}>OK</Text>
+          <Text style={styles.label}>Password</Text>
+          <View style={styles.inputWrapper}>
+            <Ionicons name="lock-closed-outline" size={20} color="#64748B" style={styles.inputIcon} />
+            <TextInput
+              style={styles.input}
+              placeholder="Enter password"
+              placeholderTextColor="#94A3B8"
+              secureTextEntry={!showPassword}
+              autoCapitalize="none"
+              autoCorrect={false}
+              value={password}
+              onChangeText={setPassword}
+              onSubmitEditing={login}
+            />
+            <TouchableOpacity onPress={() => setShowPassword(!showPassword)}>
+              <Ionicons name={showPassword ? 'eye-off-outline' : 'eye-outline'} size={20} color="#64748B" />
             </TouchableOpacity>
           </View>
+
+          {error ? <View style={styles.errorBox}><Text style={styles.errorText}>{error}</Text></View> : null}
+
+          <TouchableOpacity style={styles.primaryBtn} onPress={login} disabled={loading}>
+            {loading ? <ActivityIndicator color="#fff" /> : (
+              <Text style={styles.primaryBtnText}>Login</Text>
+            )}
+          </TouchableOpacity>
         </View>
-      </Modal>
-    </View>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, justifyContent: 'center', padding: 24, backgroundColor: '#fff' },
-  title: { fontSize: 28, fontWeight: 'bold', textAlign: 'center' },
-  subtitle: { fontSize: 16, textAlign: 'center', color: '#666', marginBottom: 32 },
-  input: { borderWidth: 1, borderColor: '#ccc', borderRadius: 8, padding: 14, fontSize: 16, marginBottom: 14 },
-  button: { backgroundColor: '#1a56db', padding: 14, borderRadius: 8, alignItems: 'center', marginTop: 4 },
-  buttonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
-  error: { color: '#c00', marginBottom: 8, textAlign: 'center' },
-  link: { color: '#1a56db', textAlign: 'center', marginTop: 16 },
-  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', padding: 32 },
-  popup: { backgroundColor: '#fff', borderRadius: 12, padding: 24, alignItems: 'center' },
-  popupTitle: { fontSize: 18, fontWeight: '600' },
-  popupOtp: { fontSize: 40, fontWeight: 'bold', letterSpacing: 6, marginVertical: 12 },
-  popupNote: { color: '#666', marginBottom: 16 },
+  safeArea: { flex: 1, backgroundColor: '#fff' },
+  container: { flex: 1, padding: 24, justifyContent: 'center' },
+  headerContainer: { alignItems: 'center', marginBottom: 48 },
+  logoBox: { width: 72, height: 72, borderRadius: 20, backgroundColor: '#2563EB', justifyContent: 'center', alignItems: 'center', marginBottom: 16, shadowColor: '#2563EB', shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.3, shadowRadius: 12, elevation: 8 },
+  title: { fontSize: 28, fontWeight: '800', color: '#0F172A', letterSpacing: -0.5 },
+  subtitle: { fontSize: 15, color: '#64748B', marginTop: 4, fontWeight: '500' },
+  formContainer: { width: '100%' },
+  label: { fontSize: 13, fontWeight: '600', color: '#0F172A', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 },
+  inputWrapper: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 12, marginBottom: 20, paddingHorizontal: 16, height: 56 },
+  inputIcon: { marginRight: 12 },
+  input: { flex: 1, fontSize: 16, color: '#0F172A', fontWeight: '500' },
+  primaryBtn: { backgroundColor: '#2563EB', height: 56, borderRadius: 12, justifyContent: 'center', alignItems: 'center', shadowColor: '#2563EB', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 8, elevation: 4 },
+  primaryBtnText: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  errorBox: { backgroundColor: '#FEF2F2', padding: 12, borderRadius: 8, marginBottom: 16, borderWidth: 1, borderColor: '#FCA5A5' },
+  errorText: { color: '#DC2626', fontSize: 13, fontWeight: '500', textAlign: 'center' },
 });

@@ -4,11 +4,10 @@ import { WebView } from 'react-native-webview';
 import * as Location from 'expo-location';
 import { useKeepAwake } from 'expo-keep-awake';
 import { apiPost } from '../api';
-import { distanceMeters, formatDistance, formatDuration } from '../utils/geo';
+import { distanceMeters, formatDistance, formatDuration, isValidMovement } from '../utils/geo'; // ADDED isValidMovement
 
 const MAP_HTML = `<!DOCTYPE html><html><head>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<meta name="referrer" content="origin">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <style>html,body,#map{height:100%;margin:0;padding:0}</style>
 </head><body><div id="map"></div>
@@ -16,12 +15,9 @@ const MAP_HTML = `<!DOCTYPE html><html><head>
 <script>
 var map, line, startM, meM;
 function init(){
-  if(!window.L){
-    document.getElementById('map').innerHTML='<p style="padding:16px;font-family:sans-serif">Map could not load. Check your internet connection. Tracking still works.</p>';
-    return;
-  }
+  if(!window.L){ document.getElementById('map').innerHTML='<p style="padding:16px;font-family:sans-serif">Map could not load.</p>'; return; }
   map=L.map('map').setView([12.9716,77.5946],15);
-  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}).addTo(map);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap'}).addTo(map);
   line=L.polyline([],{color:'#1a56db',weight:5}).addTo(map);
 }
 window.updatePath=function(pts){
@@ -76,13 +72,17 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
 
   const addPoint = (p) => {
     const last = pathRef.current[pathRef.current.length - 1];
+    
+    // NEW: Check if the movement is valid (filters noise and jumps)
+    if (last && !isValidMovement(last, p)) return; 
+    
     const d = last ? distanceMeters(last, p) : 0;
-    if (last && d < 3) return;
+
     pathRef.current = [...pathRef.current, p];
     metersRef.current += d;
     pendingRef.current.push(p);
     pendingMetersRef.current += d;
-    setPath(pathRef.current);
+    setPath([...pathRef.current]); // Trigger re-render smoothly
     setMeters(metersRef.current);
   };
 
@@ -108,15 +108,16 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
         Alert.alert('Location needed', 'Please allow location access to track the recovery.');
         return;
       }
+      
+      // NEW: Changed timeInterval to 2000ms and distanceInterval to 2m for smoother tracking
       const sub = await Location.watchPositionAsync(
-        { accuracy: Location.Accuracy.BestForNavigation, distanceInterval: 5, timeInterval: 3000 },
+        { accuracy: Location.Accuracy.BestForNavigation, distanceInterval: 2, timeInterval: 2000 },
         (loc) => {
           const c = loc.coords;
-          if (c.accuracy && c.accuracy > 50) return;
           addPoint({
             latitude: c.latitude,
             longitude: c.longitude,
-            accuracy: c.accuracy || 0,
+            accuracy: c.accuracy || 10, // Default to 10 if unknown
             speed: c.speed && c.speed > 0 ? c.speed : 0,
             timestamp: new Date(loc.timestamp).toISOString(),
           });
@@ -147,12 +148,12 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
       const p = {
         latitude: cur.coords.latitude,
         longitude: cur.coords.longitude,
-        accuracy: cur.coords.accuracy || 0,
+        accuracy: cur.coords.accuracy || 10,
         speed: 0,
         timestamp: new Date().toISOString(),
       };
       addPoint(p);
-      end = pathRef.current[pathRef.current.length - 1];
+      end = pathRef.current[pathRef.current.length - 1] || end;
     } catch (e) {}
     if (!end) {
       Alert.alert('No location yet', 'Could not read your location. Move to an open area and try again.');
