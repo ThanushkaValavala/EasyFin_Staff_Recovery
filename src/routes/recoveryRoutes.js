@@ -58,6 +58,9 @@ router.get(
 );
 router.post('/start-with-photo', protect, upload.safeSingle('startPhoto'), flow.startWithPhoto);
 router.post('/sessions/:sessionId/finish', protect, upload.safeSingle('endPhoto'), flow.finishSession);
+router.post('/sessions/:sessionId/finish-walk', protect, flow.finishSessionWalk);
 router.get('/evidence/:evidenceId/image', protect, evidenceController.getEvidenceImage);
+router.get('/history', protect, flow.getHistory);
+router.post('/sync', protect, flow.syncOfflineSession);
 
 module.exports = router;

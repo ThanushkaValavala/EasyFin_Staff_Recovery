@@ -43,8 +43,16 @@ const recoverySessionSchema = new mongoose.Schema(
     startSpeedometerEvidenceId: { type: String, default: '' },
     endSpeedometerEvidenceId: { type: String, default: '' },
     remarks: { type: String, default: '' },
+    rawRemarks: { type: String, default: '' },
+    nlpSummary: { type: String, default: '' },
+    nlpCategory: {
+      type: String,
+      enum: ['PAID', 'PROMISED', 'UNAVAILABLE', 'REFUSED', 'GENERAL', ''],
+      default: '',
+    },
     vehicleType: { type: String, default: '' },
     vehicleNumber: { type: String, default: '' },
+    deviceSessionId: { type: String, default: '', index: true },
     startLocation: { latitude: { type: Number }, longitude: { type: Number } },
     endLocation: { latitude: { type: Number }, longitude: { type: Number } }
   },

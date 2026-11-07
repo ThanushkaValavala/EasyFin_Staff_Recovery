@@ -6,6 +6,8 @@ const { protect } = require('../middleware/authMiddleware');
 
 router.post('/login', authController.login);
 router.post('/register', authController.register);
+router.post('/otp/generate', authController.generateOtp);
+router.post('/otp/verify', authController.verifyOtp);
 
 router.get('/profile', protect, authController.getProfile);
 router.post('/staff', protect, authController.createStaff);

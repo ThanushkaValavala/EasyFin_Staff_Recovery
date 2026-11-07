@@ -19,8 +19,11 @@ export default function CollectionsHistoryScreen({ route }) {
   const load = useCallback(async () => {
     setError('');
     try {
-      // NOTE: Adjust this URL if your backend uses a different endpoint for history
-      const url = filter === 'TODAY' ? '/recovery/collections?filter=today' : '/recovery/collections';
+      // Fixed: was incorrectly calling /recovery/collections which doesn't exist.
+      // The correct backend endpoint is /analytics/collections
+      const url = filter === 'TODAY'
+        ? '/analytics/collections?filter=today'
+        : '/analytics/collections';
       const res = await apiGet(url);
       
       // Assuming your backend returns { collections: [...] }

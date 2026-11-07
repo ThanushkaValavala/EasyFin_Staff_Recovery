@@ -34,7 +34,7 @@ init();
 
 export default function ActiveRecoveryScreen({ route, navigation }) {
   useKeepAwake();
-  const { session, caseId, customer, loan } = route.params;
+  const { session, caseId, customer, loan, cases, transportMode } = route.params;
   const sessionId = session.sessionId || session._id;
   const started = session.startTime || session.startedAt || session.createdAt;
   const startedAt = useRef(started ? new Date(started).getTime() : Date.now());
@@ -163,6 +163,7 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
     await flush();
     allowLeave.current = true;
     navigation.replace('Complete', {
+      cases,
       session,
       caseId,
       customer,
@@ -171,6 +172,7 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
       durationSeconds: (Date.now() - startedAt.current) / 1000,
       startLocation: pathRef.current[0] || session.startLocation || null,
       endLocation: end,
+      transportMode,
     });
   };
 
@@ -192,7 +194,7 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
         onLoadEnd={() => setMapReady(true)}
       />
       <View style={styles.panel}>
-        <Text style={styles.name}>{customer?.name || 'Recovery in progress'}</Text>
+        <Text style={styles.name}>{cases && cases.length > 1 ? cases.length + ' customers' : (customer?.name || 'Recovery in progress')}</Text>
         <View style={styles.row}>
           <View style={styles.stat}>
             <Text style={styles.statValue}>{formatDuration(seconds)}</Text>
