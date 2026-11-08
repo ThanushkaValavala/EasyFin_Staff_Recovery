@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 
 /**
  * OtpRecord — Persistent OTP storage with automatic expiry via MongoDB TTL index.
- * Replaces the in-memory Map to survive server restarts/cold-starts.
+ * Includes attempts count and resend cooldown support.
  */
 const otpRecordSchema = new mongoose.Schema(
   {
@@ -18,7 +18,14 @@ const otpRecordSchema = new mongoose.Schema(
     expiresAt: {
       type: Date,
       required: true,
-      // No field-level index here — the TTL index is declared below
+    },
+    attempts: {
+      type: Number,
+      default: 0,
+    },
+    lastSentAt: {
+      type: Date,
+      default: Date.now,
     },
   },
   {
@@ -30,4 +37,3 @@ const otpRecordSchema = new mongoose.Schema(
 otpRecordSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 module.exports = mongoose.model('OtpRecord', otpRecordSchema);
-

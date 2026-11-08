@@ -22,26 +22,30 @@ const protect = async (req, res, next) => {
     const secret = process.env.JWT_SECRET;
     const decoded = jwt.verify(token, secret);
 
+    const agentId = decoded.agentId || decoded.id;
+
     if (getIsConnected()) {
-      const staff = await Staff.findById(decoded.id).select('-password');
+      const staff = await Staff.findById(agentId).select('-password');
       if (!staff || !staff.isActive) {
         return res.status(401).json({
           success: false,
-          message: 'Staff account not found or deactivated.'
+          message: 'Agent account not found or deactivated.'
         });
       }
       req.staff = staff;
+      req.agent = staff;
     } else {
-      const staff = memoryStore.staffList.find(s => s._id === decoded.id || s.employeeId === decoded.employeeId);
+      const staff = memoryStore.staffList.find(s => s._id === agentId || s.employeeId === decoded.employeeId);
       if (!staff || !staff.isActive) {
         return res.status(401).json({
           success: false,
-          message: 'Staff account not found or deactivated.'
+          message: 'Agent account not found or deactivated.'
         });
       }
       const staffSafe = { ...staff };
       delete staffSafe.password;
       req.staff = staffSafe;
+      req.agent = staffSafe;
     }
 
     next();

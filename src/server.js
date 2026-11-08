@@ -7,6 +7,7 @@ const { connectDB } = require('./config/db');
 const memoryStore = require('./services/store');
 
 const authRoutes = require('./routes/authRoutes');
+const agentRoutes = require('./routes/agentRoutes');
 const caseRoutes = require('./routes/caseRoutes');
 const recoveryRoutes = require('./routes/recoveryRoutes');
 const reportRoutes = require('./routes/reportRoutes');
@@ -36,7 +37,9 @@ app.get('/api/health', (req, res) => {
 
 // API Routes
 app.use('/api/v1/auth', authRoutes);
+app.use('/api/v1/agent', agentRoutes);
 app.use('/api/v1/cases', caseRoutes);
+app.use('/api/v1/assignments', caseRoutes); // Alias for specification: GET /assignments
 app.use('/api/v1/recovery', recoveryRoutes);
 app.use('/api/v1/reports', reportRoutes);
 app.use('/api/v1/analytics', analyticsRoutes);

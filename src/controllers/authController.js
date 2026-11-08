@@ -5,6 +5,7 @@ const OtpRecord = require('../models/OtpRecord');
 const memoryStore = require('../services/store');
 const { getIsConnected } = require('../config/db');
 const { generateStrongPassword } = require('../services/passwordGenerator');
+const { normalizePhoneNumber } = require('../utils/phoneNormalizer');
 
 const generateToken = (staff) => {
   const secret = process.env.JWT_SECRET;
@@ -13,11 +14,15 @@ const generateToken = (staff) => {
     throw new Error('JWT_SECRET is not configured in .env');
   }
 
+  const normalizedPhone = staff.phone ? normalizePhoneNumber(staff.phone) : '';
+
   return jwt.sign(
     {
       id: staff._id.toString(),
+      agentId: staff._id.toString(),
       employeeId: staff.employeeId,
       email: staff.email,
+      phone: normalizedPhone,
       role: staff.role
     },
     secret,
@@ -233,36 +238,70 @@ exports.register = async (req, res) => {
 // OTPs are persisted in MongoDB via the OtpRecord model with a TTL index.
 // This survives server restarts and Render cold-starts.
 // Falls back to an in-memory store only if MongoDB is unavailable.
-const otpFallbackStore = new Map(); // phone -> { otp, expiresAt } — only used offline
+const otpFallbackStore = new Map(); // phone -> { otp, expiresAt, attempts, lastSentAt } — only used offline
+const RESEND_COOLDOWN_MS = 30 * 1000; // 30 seconds resend cooldown
+const MAX_VERIFY_ATTEMPTS = 5;
 
 exports.generateOtp = async (req, res) => {
   try {
-    const phone = String(req.body.phone || '').trim();
-    if (!phone || phone.length < 7) {
+    const rawPhone = String(req.body.phone || '').trim();
+    const phone = normalizePhoneNumber(rawPhone);
+    if (!phone || phone.length < 8) {
       return res.status(400).json({ success: false, message: 'Valid phone number is required.' });
     }
 
-    const otp = String(Math.floor(100000 + Math.random() * 900000));
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    const now = Date.now();
 
     if (getIsConnected()) {
-      // Remove any existing OTP for this phone, then insert a fresh one
-      await OtpRecord.deleteMany({ phone });
-      await OtpRecord.create({ phone, otp, expiresAt });
-      console.log(`[OTP] Stored in MongoDB for phone ${phone}, expires ${expiresAt.toISOString()}`);
-    } else {
-      // MongoDB unavailable — fall back to memory (OTP will be lost on restart)
-      otpFallbackStore.set(phone, { otp, expiresAt: expiresAt.getTime() });
-      console.warn('[OTP] MongoDB unavailable — using in-memory fallback for phone', phone);
-    }
+      // Check resend cooldown
+      const existing = await OtpRecord.findOne({ phone });
+      if (existing && existing.lastSentAt) {
+        const elapsed = now - new Date(existing.lastSentAt).getTime();
+        if (elapsed < RESEND_COOLDOWN_MS) {
+          const waitSec = Math.ceil((RESEND_COOLDOWN_MS - elapsed) / 1000);
+          return res.status(429).json({
+            success: false,
+            message: `Please wait ${waitSec} seconds before requesting another OTP.`
+          });
+        }
+      }
 
-    // For demo: return the OTP in the response so it shows on screen
-    return res.status(200).json({
-      success: true,
-      message: 'OTP generated.',
-      otp, // visible for demo
-      phone,
-    });
+      const otp = String(Math.floor(100000 + Math.random() * 900000));
+      const expiresAt = new Date(now + 10 * 60 * 1000); // 10 minutes
+
+      await OtpRecord.deleteMany({ phone });
+      await OtpRecord.create({ phone, otp, expiresAt, attempts: 0, lastSentAt: new Date(now) });
+      console.log(`[OTP] Stored in MongoDB for phone ${phone}, expires ${expiresAt.toISOString()}`);
+
+      return res.status(200).json({
+        success: true,
+        message: 'OTP generated.',
+        otp, // visible for demo
+        phone,
+      });
+    } else {
+      // MongoDB unavailable — fall back to memory
+      const stored = otpFallbackStore.get(phone);
+      if (stored && stored.lastSentAt && now - stored.lastSentAt < RESEND_COOLDOWN_MS) {
+        const waitSec = Math.ceil((RESEND_COOLDOWN_MS - (now - stored.lastSentAt)) / 1000);
+        return res.status(429).json({
+          success: false,
+          message: `Please wait ${waitSec} seconds before requesting another OTP.`
+        });
+      }
+
+      const otp = String(Math.floor(100000 + Math.random() * 900000));
+      const expiresAt = now + 10 * 60 * 1000;
+      otpFallbackStore.set(phone, { otp, expiresAt, attempts: 0, lastSentAt: now });
+      console.warn('[OTP] MongoDB unavailable — using in-memory fallback for phone', phone);
+
+      return res.status(200).json({
+        success: true,
+        message: 'OTP generated.',
+        otp,
+        phone,
+      });
+    }
   } catch (error) {
     console.error('generateOtp error:', error);
     return res.status(500).json({ success: false, message: 'Could not generate OTP.' });
@@ -271,7 +310,8 @@ exports.generateOtp = async (req, res) => {
 
 exports.verifyOtp = async (req, res) => {
   try {
-    const phone = String(req.body.phone || '').trim();
+    const rawPhone = String(req.body.phone || '').trim();
+    const phone = normalizePhoneNumber(rawPhone);
     const otp = String(req.body.otp || '').trim();
 
     if (!phone || !otp) {
@@ -281,24 +321,28 @@ exports.verifyOtp = async (req, res) => {
     let otpValid = false;
 
     if (getIsConnected()) {
-      // Look up the valid, unexpired OTP in MongoDB
-      const record = await OtpRecord.findOne({
-        phone,
-        expiresAt: { $gt: new Date() }, // not expired
-      });
+      const record = await OtpRecord.findOne({ phone });
 
       if (!record) {
-        // Check if an expired record exists (for a better error message)
-        const expired = await OtpRecord.findOne({ phone });
-        if (expired) {
-          // Clean it up
-          await OtpRecord.deleteMany({ phone });
-          return res.status(400).json({ success: false, message: 'OTP has expired. Request a new one.' });
-        }
         return res.status(400).json({ success: false, message: 'No OTP found. Request a new one.' });
       }
 
+      if (new Date() > new Date(record.expiresAt)) {
+        await OtpRecord.deleteMany({ phone });
+        return res.status(400).json({ success: false, message: 'OTP has expired. Request a new one.' });
+      }
+
+      // Check max attempts
+      if ((record.attempts || 0) >= MAX_VERIFY_ATTEMPTS) {
+        await OtpRecord.deleteMany({ phone });
+        return res.status(429).json({
+          success: false,
+          message: 'Maximum verification attempts exceeded. Please request a new OTP.'
+        });
+      }
+
       if (record.otp !== otp) {
+        await OtpRecord.updateOne({ _id: record._id }, { $inc: { attempts: 1 } });
         return res.status(400).json({ success: false, message: 'Incorrect OTP. Please try again.' });
       }
 
@@ -316,7 +360,15 @@ exports.verifyOtp = async (req, res) => {
         otpFallbackStore.delete(phone);
         return res.status(400).json({ success: false, message: 'OTP has expired. Request a new one.' });
       }
+      if ((stored.attempts || 0) >= MAX_VERIFY_ATTEMPTS) {
+        otpFallbackStore.delete(phone);
+        return res.status(429).json({
+          success: false,
+          message: 'Maximum verification attempts exceeded. Please request a new OTP.'
+        });
+      }
       if (stored.otp !== otp) {
+        stored.attempts = (stored.attempts || 0) + 1;
         return res.status(400).json({ success: false, message: 'Incorrect OTP. Please try again.' });
       }
       otpFallbackStore.delete(phone);
@@ -328,7 +380,7 @@ exports.verifyOtp = async (req, res) => {
       return res.status(400).json({ success: false, message: 'OTP verification failed.' });
     }
 
-    // Look up staff by phone number (or create a demo staff record)
+    // Look up staff by normalized phone number (or create a permanent agent record)
     let staff = null;
     if (getIsConnected()) {
       staff = await Staff.findOne({ phone });
@@ -337,7 +389,7 @@ exports.verifyOtp = async (req, res) => {
       staff = memoryStore.staffList.find((s) => s.phone === phone);
     }
 
-    // If no matching staff, create a temporary demo profile
+    // If no matching staff, create a permanent agent profile
     if (!staff) {
       if (getIsConnected()) {
         try {
@@ -377,11 +429,7 @@ exports.verifyOtp = async (req, res) => {
       }
     }
 
-    const token = jwt.sign(
-      { id: staff._id.toString(), phone, role: staff.role || 'field_officer' },
-      process.env.JWT_SECRET || 'demo_secret',
-      { expiresIn: '7d' }
-    );
+    const token = generateToken(staff);
 
     const safeStaff = typeof staff.toJSON === 'function' ? staff.toJSON() : { ...staff };
     delete safeStaff.password;
