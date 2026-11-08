@@ -62,5 +62,6 @@ router.post('/sessions/:sessionId/finish-walk', protect, flow.finishSessionWalk)
 router.get('/evidence/:evidenceId/image', protect, evidenceController.getEvidenceImage);
 router.get('/history', protect, flow.getHistory);
 router.post('/sync', protect, flow.syncOfflineSession);
+router.get('/stats', protect, flow.getAgentStats);
 
 module.exports = router;

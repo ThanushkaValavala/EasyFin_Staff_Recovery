@@ -80,7 +80,7 @@ export async function syncPendingSessions() {
 
   for (const session of list) {
     try {
-      const isWalk = (session.vehicleType || '').toUpperCase() === 'WALK';
+      const isWalk = ['WALK', 'CYCLE'].includes((session.vehicleType || '').toUpperCase());
       const hasEndPhoto = !isWalk && !!session.endPhotoUri;
 
       // A session started online has a real backend sessionId (SESS-... format).

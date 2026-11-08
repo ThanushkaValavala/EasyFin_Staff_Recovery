@@ -3,16 +3,16 @@ const Evidence = require('../models/Evidence');
 const memoryStore = require('./store');
 const { getIsConnected } = require('../config/db');
 
-const VEHICLE_TYPES = ['WALK', 'BIKE', 'SCOOTER', 'CAR', 'AUTO', 'OTHER'];
+const VEHICLE_TYPES = ['WALK', 'CYCLE', 'BIKE', 'SCOOTER', 'CAR', 'AUTO', 'OTHER'];
 
 // Checks the vehicle type and number entered when a recovery starts.
 const validateVehicle = (vehicleType, vehicleNumber) => {
   const type = String(vehicleType || '').trim().toUpperCase();
   const number = String(vehicleNumber || '').replace(/[\s-]/g, '').toUpperCase();
 
-  // Walk mode: no vehicle number required
-  if (type === 'WALK') {
-    return { vehicleType: 'WALK', vehicleNumber: '' };
+  // Walk and Cycle modes: no vehicle number required
+  if (type === 'WALK' || type === 'CYCLE') {
+    return { vehicleType: type, vehicleNumber: '' };
   }
 
   if (!VEHICLE_TYPES.includes(type)) {

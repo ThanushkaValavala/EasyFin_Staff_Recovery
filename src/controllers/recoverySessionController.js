@@ -263,7 +263,11 @@ exports.addTrackingPoints = async (req, res) => {
     }
 
     if (getIsConnected()) {
-      const session = await RecoverySession.findOne({ sessionId, staffId });
+      const agentId = (req.agent && req.agent._id) || req.staff._id;
+      const session = await RecoverySession.findOne({
+        sessionId,
+        $or: [{ agentId }, { staffId }]
+      });
 
       if (!session) {
         return res.status(404).json({
@@ -274,6 +278,7 @@ exports.addTrackingPoints = async (req, res) => {
 
       const docs = points.map(p => ({
         sessionId,
+        agentId,
         staffId,
         latitude: p.latitude,
         longitude: p.longitude,
@@ -287,7 +292,7 @@ exports.addTrackingPoints = async (req, res) => {
 
       if (incrementalDistanceMeters && incrementalDistanceMeters > 0) {
         await RecoverySession.findOneAndUpdate(
-          { sessionId, staffId },
+          { sessionId, $or: [{ agentId }, { staffId }] },
           { $inc: { distanceMeters: incrementalDistanceMeters } }
         );
       }

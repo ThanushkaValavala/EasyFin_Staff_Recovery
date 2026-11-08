@@ -3,10 +3,11 @@ const mongoose = require('mongoose');
 const recoverySessionSchema = new mongoose.Schema(
   {
     sessionId: { type: String, required: true, unique: true, index: true },
-    staffId: { type: mongoose.Schema.Types.ObjectId, ref: 'Staff', required: true, index: true },
-    assignmentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Assignment', required: true, index: true },
-    customerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', required: true },
-    loanId: { type: mongoose.Schema.Types.ObjectId, ref: 'Loan', required: true },
+    agentId: { type: mongoose.Schema.Types.Mixed, ref: 'Staff', required: true, index: true },
+    staffId: { type: mongoose.Schema.Types.Mixed, ref: 'Staff', index: true }, // backward-compatibility
+    assignmentId: { type: mongoose.Schema.Types.Mixed, ref: 'Assignment', index: true },
+    customerId: { type: mongoose.Schema.Types.Mixed, ref: 'Customer' },
+    loanId: { type: mongoose.Schema.Types.Mixed, ref: 'Loan' },
     startTime: { type: Date, required: true, default: Date.now },
     endTime: { type: Date, default: null },
     durationSeconds: { type: Number, default: 0 },
@@ -58,5 +59,15 @@ const recoverySessionSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+recoverySessionSchema.pre('save', function (next) {
+  // Sync staffId from agentId or vice-versa for full backward compatibility
+  if (this.agentId && !this.staffId) {
+    this.staffId = this.agentId;
+  } else if (this.staffId && !this.agentId) {
+    this.agentId = this.staffId;
+  }
+  next();
+});
 
 module.exports = mongoose.model('RecoverySession', recoverySessionSchema);

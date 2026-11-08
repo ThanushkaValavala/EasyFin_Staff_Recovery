@@ -7,16 +7,15 @@ import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
 import { apiGet } from '../api';
-import { summarize, BADGE_COLORS } from '../utils/nlpSummarizer';
+import { BADGE_COLORS } from '../utils/nlpSummarizer';
 import { cacheHistory, getCachedHistory, getPendingSessions, syncPendingSessions } from '../utils/offlineStore';
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
 const fmtDate = (d) => {
   if (!d) return '-';
   const x = new Date(d);
   if (isNaN(x.getTime())) return '-';
   const p = (n) => String(n).padStart(2, '0');
-  return p(x.getDate()) + '/' + p(x.getMonth() + 1) + '/' + x.getFullYear();
+  return `${p(x.getDate())}/${p(x.getMonth() + 1)}/${x.getFullYear()}`;
 };
 
 const fmtTime = (d) => {
@@ -25,7 +24,7 @@ const fmtTime = (d) => {
   if (isNaN(x.getTime())) return '-';
   const p = (n) => String(n).padStart(2, '0');
   const h = x.getHours() % 12 || 12;
-  return p(h) + ':' + p(x.getMinutes()) + ' ' + (x.getHours() < 12 ? 'AM' : 'PM');
+  return `${p(h)}:${p(x.getMinutes())} ${x.getHours() < 12 ? 'AM' : 'PM'}`;
 };
 
 const fmtDuration = (s) => {
@@ -34,41 +33,55 @@ const fmtDuration = (s) => {
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
   const pad = (n) => String(n).padStart(2, '0');
-  return (h > 0 ? h + 'h ' : '') + pad(m) + 'm';
+  return (h > 0 ? `${h}h ` : '') + `${pad(m)}m`;
 };
 
 const fmtDistance = (m) => {
   if (!m && m !== 0) return '-';
-  return m < 1000 ? Math.round(m) + ' m' : (m / 1000).toFixed(2) + ' km';
+  return m < 1000 ? `${Math.round(m)} m` : `${(m / 1000).toFixed(2)} km`;
 };
 
-// ── NLP Badge ────────────────────────────────────────────────────────────────
 function NlpBadge({ category, summary }) {
   const colors = BADGE_COLORS[category] || BADGE_COLORS.GENERAL;
   return (
     <View style={[styles.badge, { backgroundColor: colors.bg, borderColor: colors.border }]}>
-      <Text style={[styles.badgeText, { color: colors.text }]}>{summary}</Text>
+      <Text style={[styles.badgeText, { color: colors.text }]}>
+        {summary || 'Customer Contacted - General Follow-up'}
+      </Text>
     </View>
   );
 }
 
-// ── Session Card ─────────────────────────────────────────────────────────────
+function InfoRow({ icon, label, value }) {
+  return (
+    <View style={styles.infoRow}>
+      <View style={styles.infoLabelGroup}>
+        <Ionicons name={icon} size={14} color="#64748B" style={{ marginRight: 6 }} />
+        <Text style={styles.infoLabel}>{label}:</Text>
+      </View>
+      <Text style={styles.infoValue} numberOfLines={1}>{value || '-'}</Text>
+    </View>
+  );
+}
+
 function SessionCard({ session }) {
   const vehicleLabel = session.vehicleType
     ? session.vehicleType.charAt(0).toUpperCase() + session.vehicleType.slice(1).toLowerCase()
-    : '-';
-  const nlpCategory = session.nlpCategory
-    || summarize(session.rawRemarks || session.remarks || '').nlpCategory;
-  const nlpSummary = session.nlpSummary
-    || summarize(session.rawRemarks || session.remarks || '').nlpSummary;
+    : 'Walk';
+
+  const nlpCategory = session.nlpCategory || 'GENERAL';
+  const nlpSummary = session.nlpSummary || 'Customer Contacted - General Follow-up';
   const isPending = session._syncStatus === 'PENDING';
+
+  const startLoc = session.startLocation ? `${session.startLocation.latitude?.toFixed(4)}, ${session.startLocation.longitude?.toFixed(4)}` : null;
+  const endLoc = session.endLocation ? `${session.endLocation.latitude?.toFixed(4)}, ${session.endLocation.longitude?.toFixed(4)}` : null;
 
   return (
     <View style={[styles.sessionCard, isPending && styles.sessionCardPending]}>
       {isPending ? (
         <View style={styles.pendingBanner}>
           <Ionicons name="cloud-upload-outline" size={13} color="#92400E" style={{ marginRight: 4 }} />
-          <Text style={styles.pendingText}>Pending sync to cloud</Text>
+          <Text style={styles.pendingText}>Pending Sync to Cloud</Text>
         </View>
       ) : null}
 
@@ -78,85 +91,114 @@ function SessionCard({ session }) {
           <Text style={styles.dateText}>{fmtDate(session.endTime || session.startTime)}</Text>
         </View>
         <View style={[styles.modeBadge, {
-          backgroundColor: vehicleLabel === 'Walk' ? '#DCFCE7' : '#EFF6FF'
+          backgroundColor: vehicleLabel === 'Walk' ? '#DCFCE7' : '#EFF6FF',
+          borderColor: vehicleLabel === 'Walk' ? '#86EFAC' : '#BFDBFE',
         }]}>
           <Text style={[styles.modeText, {
-            color: vehicleLabel === 'Walk' ? '#15803D' : '#1E40AF'
+            color: vehicleLabel === 'Walk' ? '#15803D' : '#1E40AF',
           }]}>{vehicleLabel}</Text>
         </View>
       </View>
 
+      {/* NLP Summary Badge */}
       <NlpBadge category={nlpCategory} summary={nlpSummary} />
 
       <View style={styles.sessionInfoGrid}>
-        <InfoRow icon="time-outline"              label="Start"    value={fmtTime(session.startTime)} />
-        <InfoRow icon="checkmark-circle-outline"  label="End"      value={fmtTime(session.endTime)} />
-        <InfoRow icon="hourglass-outline"          label="Duration" value={fmtDuration(session.durationSeconds)} />
-        <InfoRow icon="navigate-outline"           label="Distance" value={fmtDistance(session.distanceMeters)} />
+        <InfoRow icon="time-outline" label="Start Time" value={fmtTime(session.startTime)} />
+        <InfoRow icon="checkmark-circle-outline" label="End Time" value={fmtTime(session.endTime)} />
+        <InfoRow icon="hourglass-outline" label="Duration" value={fmtDuration(session.durationSeconds)} />
+        <InfoRow icon="navigate-outline" label="Distance" value={fmtDistance(session.distanceMeters)} />
         {session.vehicleNumber ? (
-          <InfoRow icon="car-outline" label="Vehicle" value={session.vehicleNumber} />
+          <InfoRow icon="car-outline" label="Vehicle Reg" value={session.vehicleNumber} />
+        ) : null}
+        {startLoc ? (
+          <InfoRow icon="location-outline" label="Start Loc" value={startLoc} />
+        ) : null}
+        {endLoc ? (
+          <InfoRow icon="flag-outline" label="End Loc" value={endLoc} />
         ) : null}
       </View>
     </View>
   );
 }
 
-function InfoRow({ icon, label, value }) {
-  return (
-    <View style={styles.infoRow}>
-      <Ionicons name={icon} size={13} color="#64748B" style={{ marginRight: 5 }} />
-      <Text style={styles.infoLabel}>{label}: </Text>
-      <Text style={styles.infoValue}>{value}</Text>
-    </View>
-  );
-}
-
-// ── Main Screen ───────────────────────────────────────────────────────────────
 export default function ProfileScreen({ navigation }) {
   const [staff, setStaff] = useState(null);
   const [sessions, setSessions] = useState([]);
+  const [pendingSessions, setPendingSessions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState('');
-  const [isOffline, setIsOffline] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [isOfflineMode, setIsOfflineMode] = useState(false);
 
-  const load = useCallback(async () => {
-    setError('');
-    setIsOffline(false);
+  const loadData = useCallback(async () => {
     try {
-      // Staff info from SecureStore (set at login)
       const s = await SecureStore.getItemAsync('staff');
       if (s) setStaff(JSON.parse(s));
 
-      // Sync any pending offline sessions first
-      syncPendingSessions().catch(() => {});
+      const pendings = await getPendingSessions();
+      setPendingSessions(pendings || []);
 
-      // History — MongoDB is source of truth
-      const res = await apiGet('/recovery/history');
-      const cloudSessions = res.sessions || [];
-      setSessions(cloudSessions);
-      await cacheHistory(cloudSessions);
+      // Load profile info from /agent/profile or /auth/profile
+      try {
+        const profRes = await apiGet('/agent/profile');
+        if (profRes && profRes.staff) {
+          setStaff(profRes.staff);
+          await SecureStore.setItemAsync('staff', JSON.stringify(profRes.staff));
+        }
+      } catch (pe) {
+        try {
+          const authProf = await apiGet('/auth/profile');
+          if (authProf && authProf.staff) {
+            setStaff(authProf.staff);
+            await SecureStore.setItemAsync('staff', JSON.stringify(authProf.staff));
+          }
+        } catch (err2) {}
+      }
+
+      // Load recovery history for authenticated agent
+      try {
+        const res = await apiGet('/recovery/history');
+        const list = res.sessions || [];
+        setSessions(list);
+        await cacheHistory(list);
+        setIsOfflineMode(false);
+      } catch (he) {
+        console.warn('[ProfileScreen] History fetch failed, falling back to cache:', he.message);
+        const cached = await getCachedHistory();
+        setSessions(cached);
+        setIsOfflineMode(true);
+      }
     } catch (e) {
-      console.warn('[Profile] backend fetch failed:', e.message);
-      setIsOffline(true);
-
-      // Fallback: cached + pending
-      const [cached, pending] = await Promise.all([getCachedHistory(), getPendingSessions()]);
-      const pendingIds = new Set(pending.map((s) => s.deviceSessionId || s.sessionId));
-      const filtered = cached.filter((s) => !pendingIds.has(s.deviceSessionId || s.sessionId));
-      const merged = [...pending, ...filtered].sort(
-        (a, b) => new Date(b.endTime || b.startTime) - new Date(a.endTime || a.startTime)
-      );
-      setSessions(merged);
+      console.warn('[ProfileScreen] loadData error:', e.message);
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
   }, []);
 
-  useFocusEffect(useCallback(() => { load(); }, [load]));
+  useFocusEffect(useCallback(() => { loadData(); }, [loadData]));
 
-  const logout = () => {
+  const handleSyncNow = async () => {
+    setSyncing(true);
+    try {
+      const { synced, failed } = await syncPendingSessions();
+      if (synced > 0) {
+        Alert.alert('Sync Complete', `Successfully synced ${synced} pending recovery session(s).`);
+      } else if (failed > 0) {
+        Alert.alert('Sync Incomplete', `${failed} session(s) could not be synced. Check connectivity and retry.`);
+      } else {
+        Alert.alert('Sync Status', 'All recovery records are already up to date.');
+      }
+      await loadData();
+    } catch (e) {
+      Alert.alert('Sync Error', e.message || 'Could not synchronize.');
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const handleLogout = () => {
     Alert.alert('Sign Out', 'Are you sure you want to log out?', [
       { text: 'Cancel', style: 'cancel' },
       {
@@ -165,16 +207,23 @@ export default function ProfileScreen({ navigation }) {
         onPress: async () => {
           await SecureStore.deleteItemAsync('token');
           await SecureStore.deleteItemAsync('staff');
-          navigation.replace('Login');
+          navigation.reset({ index: 0, routes: [{ name: 'Login' }] });
         },
       },
     ]);
   };
 
+  // Combine pending offline sessions with backend sessions
+  const allSessions = [
+    ...pendingSessions.filter(p => !sessions.some(s => s.sessionId === p.sessionId || s.deviceSessionId === p.deviceSessionId)),
+    ...sessions,
+  ];
+
   if (loading) {
     return (
       <View style={styles.center}>
         <ActivityIndicator size="large" color="#2563EB" />
+        <Text style={styles.loadingText}>Loading profile...</Text>
       </View>
     );
   }
@@ -186,83 +235,105 @@ export default function ProfileScreen({ navigation }) {
       refreshControl={
         <RefreshControl
           refreshing={refreshing}
-          onRefresh={() => { setRefreshing(true); load(); }}
+          onRefresh={() => { setRefreshing(true); loadData(); }}
+          colors={['#2563EB']}
         />
       }
     >
-      {/* ── Agent Details ─────────────────────────────────────────────── */}
-      <View style={styles.agentCard}>
-        <View style={styles.avatarLarge}>
-          <Text style={styles.avatarText}>
-            {staff?.name ? staff.name.charAt(0).toUpperCase() : 'A'}
-          </Text>
+      {/* ── AGENT INFORMATION CARD ────────────────────────────────────── */}
+      <View style={styles.profileCard}>
+        <View style={styles.profileHeader}>
+          <View style={styles.avatar}>
+            <Text style={styles.avatarText}>{staff?.name?.charAt(0)?.toUpperCase() || 'A'}</Text>
+          </View>
+          <View style={{ marginLeft: 16, flex: 1 }}>
+            <Text style={styles.agentName}>{staff?.name || 'Recovery Agent'}</Text>
+            <Text style={styles.agentRole}>Field Recovery Officer</Text>
+            <View style={styles.phoneBadge}>
+              <Ionicons name="call" size={12} color="#2563EB" style={{ marginRight: 4 }} />
+              <Text style={styles.phoneText}>{staff?.phone || '-'}</Text>
+            </View>
+          </View>
         </View>
-        <Text style={styles.agentName}>{staff?.name || 'Agent'}</Text>
-        <Text style={styles.agentRole}>Recovery Agent</Text>
 
-        <View style={styles.agentMeta}>
-          {staff?.phone ? (
-            <View style={styles.metaItem}>
-              <Ionicons name="call-outline" size={14} color="#64748B" />
-              <Text style={styles.metaText}>{staff.phone}</Text>
-            </View>
-          ) : null}
-          {staff?.employeeId ? (
-            <View style={styles.metaItem}>
-              <Ionicons name="id-card-outline" size={14} color="#64748B" />
-              <Text style={styles.metaText}>{staff.employeeId}</Text>
-            </View>
-          ) : null}
-          {staff?.assignedArea ? (
-            <View style={styles.metaItem}>
-              <Ionicons name="location-outline" size={14} color="#64748B" />
-              <Text style={styles.metaText}>{staff.assignedArea}</Text>
-            </View>
-          ) : null}
+        <View style={styles.divider} />
+
+        <View style={styles.profileMetaGrid}>
+          <View style={styles.metaItem}>
+            <Text style={styles.metaLabel}>Employee ID</Text>
+            <Text style={styles.metaValue}>{staff?.employeeId || '-'}</Text>
+          </View>
+          <View style={styles.metaItem}>
+            <Text style={styles.metaLabel}>Assigned Zone</Text>
+            <Text style={styles.metaValue}>{staff?.assignedArea || 'Main Branch'}</Text>
+          </View>
+          <View style={styles.metaItem}>
+            <Text style={styles.metaLabel}>Total Recoveries</Text>
+            <Text style={styles.metaValue}>
+              {typeof staff?.recoveryCount === 'number'
+                ? staff.recoveryCount
+                : allSessions.filter((s) => !s._syncStatus).length}
+            </Text>
+          </View>
+          <View style={styles.metaItem}>
+            <Text style={styles.metaLabel}>Total Distance</Text>
+            <Text style={styles.metaValue}>
+              {typeof staff?.totalDistanceKm === 'number'
+                ? `${staff.totalDistanceKm.toFixed(2)} km`
+                : '-'}
+            </Text>
+          </View>
         </View>
+
+        <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
+          <Ionicons name="log-out-outline" size={16} color="#DC2626" style={{ marginRight: 6 }} />
+          <Text style={styles.logoutBtnText}>Sign Out</Text>
+        </TouchableOpacity>
       </View>
 
-      {/* ── Offline banner ────────────────────────────────────────────── */}
-      {isOffline ? (
-        <View style={styles.offlineBanner}>
-          <Ionicons name="wifi-outline" size={15} color="#92400E" style={{ marginRight: 6 }} />
-          <Text style={styles.offlineText}>Offline — showing locally saved sessions</Text>
+      {/* Sync Bar if pending sessions exist */}
+      {pendingSessions.length > 0 ? (
+        <View style={styles.syncNoticeBox}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.syncNoticeTitle}>
+              {pendingSessions.length} Pending Offline Recovery{pendingSessions.length > 1 ? 'ies' : ''}
+            </Text>
+            <Text style={styles.syncNoticeSub}>Stored in SecureStore — ready to sync to MongoDB</Text>
+          </View>
+          <TouchableOpacity style={styles.syncNowBtn} onPress={handleSyncNow} disabled={syncing}>
+            {syncing ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <Text style={styles.syncNowBtnText}>Sync Now</Text>
+            )}
+          </TouchableOpacity>
         </View>
       ) : null}
 
-      {error ? (
-        <View style={styles.errorBox}>
-          <Text style={styles.errorText}>{error}</Text>
+      {isOfflineMode ? (
+        <View style={styles.offlineNotice}>
+          <Ionicons name="cloud-offline" size={16} color="#92400E" style={{ marginRight: 6 }} />
+          <Text style={styles.offlineNoticeText}>Viewing cached recovery history (offline)</Text>
         </View>
       ) : null}
 
-      {/* ── Completed Recovery History ────────────────────────────────── */}
-      <Text style={styles.sectionTitle}>
-        Completed Recoveries
-        {sessions.length > 0 ? (
-          <Text style={styles.sectionCount}> ({sessions.length})</Text>
-        ) : null}
-      </Text>
+      {/* ── COMPLETED RECOVERY HISTORY ─────────────────────────────────── */}
+      <View style={styles.historyHeaderRow}>
+        <Text style={styles.historySectionTitle}>Completed Recovery History</Text>
+        <Text style={styles.historyCountText}>{allSessions.length} Total</Text>
+      </View>
 
-      {sessions.length === 0 ? (
-        <View style={styles.emptyBox}>
-          <Ionicons name="document-outline" size={44} color="#CBD5E1" />
-          <Text style={styles.emptyText}>No completed recoveries yet.</Text>
+      {allSessions.length === 0 ? (
+        <View style={styles.emptyCard}>
+          <Ionicons name="time-outline" size={38} color="#94A3B8" />
+          <Text style={styles.emptyTitle}>No Completed Recoveries Yet</Text>
+          <Text style={styles.emptySub}>Recoveries you complete will appear here with NLP summaries.</Text>
         </View>
       ) : (
-        sessions.map((s, i) => (
-          <SessionCard
-            key={s._id || s.sessionId || s.deviceSessionId || i}
-            session={s}
-          />
+        allSessions.map((session, idx) => (
+          <SessionCard key={session._id || session.sessionId || session.deviceSessionId || idx} session={session} />
         ))
       )}
-
-      {/* ── Sign Out ──────────────────────────────────────────────────── */}
-      <TouchableOpacity style={styles.logoutBtn} onPress={logout}>
-        <Ionicons name="log-out-outline" size={20} color="#DC2626" />
-        <Text style={styles.logoutText}>Sign Out</Text>
-      </TouchableOpacity>
     </ScrollView>
   );
 }
@@ -270,83 +341,100 @@ export default function ProfileScreen({ navigation }) {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#F8FAFC' },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-
-  // Agent card
-  agentCard: {
-    alignItems: 'center', backgroundColor: '#fff', borderRadius: 20,
-    padding: 24, marginBottom: 20, borderWidth: 1, borderColor: '#F1F5F9',
+  loadingText: { marginTop: 10, fontSize: 13, color: '#64748B' },
+  profileCard: {
+    backgroundColor: '#FFFFFF', borderRadius: 18, padding: 20,
+    borderWidth: 1, borderColor: '#E2E8F0', marginBottom: 20,
     shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.04, shadowRadius: 8, elevation: 2,
   },
-  avatarLarge: {
-    width: 72, height: 72, borderRadius: 36, backgroundColor: '#2563EB',
-    justifyContent: 'center', alignItems: 'center', marginBottom: 12,
-    borderWidth: 3, borderColor: '#EFF6FF',
+  profileHeader: { flexDirection: 'row', alignItems: 'center' },
+  avatar: {
+    width: 60, height: 60, borderRadius: 30,
+    backgroundColor: '#EFF6FF', justifyContent: 'center', alignItems: 'center',
+    borderWidth: 2, borderColor: '#BFDBFE',
   },
-  avatarText: { fontSize: 28, fontWeight: '800', color: '#fff' },
-  agentName: { fontSize: 22, fontWeight: '800', color: '#0F172A', marginBottom: 2 },
-  agentRole: { fontSize: 13, color: '#64748B', fontWeight: '500', marginBottom: 14 },
-  agentMeta: { width: '100%', gap: 6 },
-  metaItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  metaText: { fontSize: 13, color: '#475569', fontWeight: '500' },
-
-  // Banners
-  offlineBanner: {
-    flexDirection: 'row', alignItems: 'center', backgroundColor: '#FEF9C3',
-    borderRadius: 8, padding: 10, marginBottom: 12, borderWidth: 1, borderColor: '#FDE047',
+  avatarText: { fontSize: 24, fontWeight: '800', color: '#2563EB' },
+  agentName: { fontSize: 18, fontWeight: '800', color: '#0F172A' },
+  agentRole: { fontSize: 12, color: '#64748B', fontWeight: '500', marginTop: 2 },
+  phoneBadge: {
+    flexDirection: 'row', alignItems: 'center', backgroundColor: '#F1F5F9',
+    paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6,
+    alignSelf: 'flex-start', marginTop: 6,
   },
-  offlineText: { fontSize: 13, color: '#92400E', fontWeight: '500' },
-  errorBox: {
-    backgroundColor: '#FEF2F2', padding: 12, borderRadius: 8,
-    marginBottom: 12, borderWidth: 1, borderColor: '#FCA5A5',
+  phoneText: { fontSize: 12, fontWeight: '700', color: '#1E293B' },
+  divider: { height: 1, backgroundColor: '#F1F5F9', marginVertical: 16 },
+  profileMetaGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', marginBottom: 14, gap: 8 },
+  metaItem: { minWidth: '30%' },
+  metaLabel: { fontSize: 10, color: '#64748B', fontWeight: '600', textTransform: 'uppercase' },
+  metaValue: { fontSize: 14, fontWeight: '700', color: '#0F172A', marginTop: 2 },
+  logoutBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    paddingVertical: 10, borderRadius: 8, backgroundColor: '#FEF2F2',
+    borderWidth: 1, borderColor: '#FCA5A5',
   },
-  errorText: { color: '#DC2626', fontSize: 13, fontWeight: '500' },
-
-  // Section header
-  sectionTitle: { fontSize: 17, fontWeight: '800', color: '#0F172A', marginBottom: 12 },
-  sectionCount: { fontSize: 14, fontWeight: '600', color: '#64748B' },
-
-  // Session cards
+  logoutBtnText: { color: '#DC2626', fontSize: 13, fontWeight: '700' },
+  syncNoticeBox: {
+    flexDirection: 'row', alignItems: 'center', backgroundColor: '#FEF3C7',
+    padding: 14, borderRadius: 12, borderWidth: 1, borderColor: '#FCD34D',
+    marginBottom: 16,
+  },
+  syncNoticeTitle: { fontSize: 13, fontWeight: '700', color: '#92400E' },
+  syncNoticeSub: { fontSize: 11, color: '#B45309', marginTop: 2 },
+  syncNowBtn: {
+    backgroundColor: '#D97706', paddingHorizontal: 12, paddingVertical: 6,
+    borderRadius: 8, marginLeft: 10,
+  },
+  syncNowBtnText: { color: '#FFFFFF', fontSize: 12, fontWeight: '700' },
+  offlineNotice: {
+    flexDirection: 'row', alignItems: 'center', backgroundColor: '#F8FAFC',
+    padding: 10, borderRadius: 8, borderWidth: 1, borderColor: '#E2E8F0',
+    marginBottom: 16,
+  },
+  offlineNoticeText: { fontSize: 12, color: '#64748B', fontWeight: '500' },
+  historyHeaderRow: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    marginBottom: 12,
+  },
+  historySectionTitle: { fontSize: 16, fontWeight: '800', color: '#0F172A' },
+  historyCountText: { fontSize: 12, fontWeight: '700', color: '#2563EB' },
   sessionCard: {
-    backgroundColor: '#fff', borderRadius: 14, padding: 14, marginBottom: 14,
-    borderWidth: 1, borderColor: '#F1F5F9',
+    backgroundColor: '#FFFFFF', borderRadius: 14, padding: 16,
+    borderWidth: 1, borderColor: '#E2E8F0', marginBottom: 12,
     shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.03, shadowRadius: 6, elevation: 1,
+    shadowOpacity: 0.03, shadowRadius: 4, elevation: 1,
   },
-  sessionCardPending: { borderColor: '#FDE68A', borderWidth: 1.5 },
+  sessionCardPending: { borderLeftWidth: 4, borderLeftColor: '#F59E0B' },
   pendingBanner: {
     flexDirection: 'row', alignItems: 'center', backgroundColor: '#FEF3C7',
-    borderRadius: 5, paddingHorizontal: 7, paddingVertical: 3, marginBottom: 8,
-    alignSelf: 'flex-start',
+    paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6,
+    alignSelf: 'flex-start', marginBottom: 10,
   },
-  pendingText: { fontSize: 11, fontWeight: '600', color: '#92400E' },
+  pendingText: { fontSize: 10, fontWeight: '700', color: '#92400E' },
   sessionHeader: {
-    flexDirection: 'row', justifyContent: 'space-between',
-    alignItems: 'center', marginBottom: 8,
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    marginBottom: 10,
   },
   dateBadge: { flexDirection: 'row', alignItems: 'center' },
-  dateText: { fontSize: 13, fontWeight: '600', color: '#2563EB' },
-  modeBadge: { borderRadius: 7, paddingHorizontal: 9, paddingVertical: 3 },
-  modeText: { fontSize: 12, fontWeight: '700' },
+  dateText: { fontSize: 13, fontWeight: '700', color: '#334155' },
+  modeBadge: {
+    paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6, borderWidth: 1,
+  },
+  modeText: { fontSize: 11, fontWeight: '800' },
   badge: {
-    borderRadius: 7, paddingHorizontal: 10, paddingVertical: 5,
-    marginBottom: 10, borderWidth: 1, alignSelf: 'flex-start',
+    paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8,
+    borderWidth: 1, marginBottom: 12, alignSelf: 'flex-start',
   },
   badgeText: { fontSize: 12, fontWeight: '700' },
   sessionInfoGrid: { gap: 4 },
-  infoRow: { flexDirection: 'row', alignItems: 'center' },
+  infoRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  infoLabelGroup: { flexDirection: 'row', alignItems: 'center' },
   infoLabel: { fontSize: 12, color: '#64748B', fontWeight: '500' },
-  infoValue: { fontSize: 12, color: '#0F172A', fontWeight: '600', flex: 1 },
-
-  // Empty
-  emptyBox: { alignItems: 'center', paddingVertical: 40 },
-  emptyText: { fontSize: 15, fontWeight: '600', color: '#475569', marginTop: 10 },
-
-  // Logout
-  logoutBtn: {
-    flexDirection: 'row', backgroundColor: '#FEF2F2', padding: 16,
-    borderRadius: 14, alignItems: 'center', justifyContent: 'center',
-    gap: 8, marginTop: 24, borderWidth: 1, borderColor: '#FECACA',
+  infoValue: { fontSize: 12, fontWeight: '600', color: '#0F172A' },
+  emptyCard: {
+    backgroundColor: '#FFFFFF', borderRadius: 14, padding: 30,
+    alignItems: 'center', borderWidth: 1, borderColor: '#E2E8F0',
   },
-  logoutText: { color: '#DC2626', fontSize: 16, fontWeight: '700' },
+  emptyTitle: { fontSize: 15, fontWeight: '700', color: '#334155', marginTop: 10 },
+  emptySub: { fontSize: 12, color: '#64748B', textAlign: 'center', marginTop: 4 },
 });

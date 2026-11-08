@@ -3,8 +3,9 @@ import { View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator } fr
 import { WebView } from 'react-native-webview';
 import * as Location from 'expo-location';
 import { useKeepAwake } from 'expo-keep-awake';
+import { Ionicons } from '@expo/vector-icons';
 import { apiPost } from '../api';
-import { distanceMeters, formatDistance, formatDuration, isValidMovement } from '../utils/geo'; // ADDED isValidMovement
+import { distanceMeters, formatDistance, formatDuration, isValidMovement } from '../utils/geo';
 
 const MAP_HTML = `<!DOCTYPE html><html><head>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
@@ -34,9 +35,9 @@ init();
 
 export default function ActiveRecoveryScreen({ route, navigation }) {
   useKeepAwake();
-  const { session, caseId, customer, loan, cases, transportMode } = route.params;
-  const sessionId = session.sessionId || session._id;
-  const started = session.startTime || session.startedAt || session.createdAt;
+  const { session, transportMode, vehicleNumber } = route.params || {};
+  const sessionId = (session && (session.sessionId || session._id)) || 'ACTIVE_SESSION';
+  const started = session?.startTime || session?.startedAt || session?.createdAt;
   const startedAt = useRef(started ? new Date(started).getTime() : Date.now());
 
   const [path, setPath] = useState([]);
@@ -65,6 +66,7 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
         incrementalDistanceMeters: Math.round(inc),
       });
     } catch (e) {
+      // Re-queue points locally if transient failure
       pendingRef.current = points.concat(pendingRef.current);
       pendingMetersRef.current += inc;
     }
@@ -73,16 +75,17 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
   const addPoint = (p) => {
     const last = pathRef.current[pathRef.current.length - 1];
     
-    // NEW: Check if the movement is valid (filters noise and jumps)
+    // Existing Drift & Jump Filter (strict preservation)
     if (last && !isValidMovement(last, p)) return; 
     
+    // Existing Haversine calculation
     const d = last ? distanceMeters(last, p) : 0;
 
     pathRef.current = [...pathRef.current, p];
     metersRef.current += d;
     pendingRef.current.push(p);
     pendingMetersRef.current += d;
-    setPath([...pathRef.current]); // Trigger re-render smoothly
+    setPath([...pathRef.current]);
     setMeters(metersRef.current);
   };
 
@@ -105,11 +108,11 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
     (async () => {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') {
-        Alert.alert('Location needed', 'Please allow location access to track the recovery.');
+        Alert.alert('Location Permission Needed', 'Please allow GPS location access to track your recovery route.');
         return;
       }
       
-      // NEW: Changed timeInterval to 2000ms and distanceInterval to 2m for smoother tracking
+      // Existing High-accuracy GPS tracking
       const sub = await Location.watchPositionAsync(
         { accuracy: Location.Accuracy.BestForNavigation, distanceInterval: 2, timeInterval: 2000 },
         (loc) => {
@@ -117,7 +120,7 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
           addPoint({
             latitude: c.latitude,
             longitude: c.longitude,
-            accuracy: c.accuracy || 10, // Default to 10 if unknown
+            accuracy: c.accuracy || 10,
             speed: c.speed && c.speed > 0 ? c.speed : 0,
             timestamp: new Date(loc.timestamp).toISOString(),
           });
@@ -133,7 +136,7 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
       navigation.addListener('beforeRemove', (e) => {
         if (allowLeave.current) return;
         e.preventDefault();
-        Alert.alert('Recovery in progress', 'Tap Stop Recovery to finish before leaving.');
+        Alert.alert('Recovery in Progress', 'Please tap Stop Recovery to finish before leaving this screen.');
       }),
     [navigation]
   );
@@ -155,32 +158,27 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
       addPoint(p);
       end = pathRef.current[pathRef.current.length - 1] || end;
     } catch (e) {}
-    if (!end) {
-      Alert.alert('No location yet', 'Could not read your location. Move to an open area and try again.');
-      setStopping(false);
-      return;
-    }
+
     await flush();
     allowLeave.current = true;
     navigation.replace('Complete', {
-      cases,
       session,
-      caseId,
-      customer,
-      loan,
       distanceMeters: metersRef.current,
       durationSeconds: (Date.now() - startedAt.current) / 1000,
-      startLocation: pathRef.current[0] || session.startLocation || null,
-      endLocation: end,
-      transportMode,
+      startLocation: pathRef.current[0] || session?.startLocation || null,
+      endLocation: end || pathRef.current[0] || null,
+      transportMode: transportMode || session?.vehicleType || 'WALK',
+      vehicleNumber: vehicleNumber || session?.vehicleNumber || '',
     });
   };
 
   const stop = () =>
-    Alert.alert('Stop recovery?', 'Tracking will end and you will add proof next.', [
+    Alert.alert('Stop Recovery?', 'Route tracking will stop and you will proceed to the completion form.', [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Stop', style: 'destructive', onPress: doStop },
+      { text: 'Stop Recovery', style: 'destructive', onPress: doStop },
     ]);
+
+  const modeLabel = transportMode || session?.vehicleType || 'WALK';
 
   return (
     <View style={styles.container}>
@@ -194,20 +192,48 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
         onLoadEnd={() => setMapReady(true)}
       />
       <View style={styles.panel}>
-        <Text style={styles.name}>{cases && cases.length > 1 ? cases.length + ' customers' : (customer?.name || 'Recovery in progress')}</Text>
-        <View style={styles.row}>
-          <View style={styles.stat}>
-            <Text style={styles.statValue}>{formatDuration(seconds)}</Text>
-            <Text style={styles.statLabel}>Time</Text>
+        {/* Header bar with Transport Mode badge */}
+        <View style={styles.topInfoRow}>
+          <View style={styles.modeBadge}>
+            <Ionicons
+              name={modeLabel === 'WALK' ? 'walk' : modeLabel === 'CYCLE' ? 'bicycle' : modeLabel === 'BIKE' ? 'bicycle' : 'car'}
+              size={14}
+              color="#2563EB"
+              style={{ marginRight: 4 }}
+            />
+            <Text style={styles.modeBadgeText}>{modeLabel}</Text>
           </View>
-          <View style={styles.stat}>
-            <Text style={styles.statValue}>{formatDistance(meters)}</Text>
-            <Text style={styles.statLabel}>Distance</Text>
+          {vehicleNumber ? (
+            <Text style={styles.vehicleNumberText}>{vehicleNumber}</Text>
+          ) : null}
+          <View style={styles.gpsIndicator}>
+            <View style={[styles.gpsDot, { backgroundColor: path.length ? '#10B981' : '#F59E0B' }]} />
+            <Text style={styles.gpsText}>{path.length ? 'GPS Active' : 'Acquiring GPS'}</Text>
           </View>
         </View>
-        {path.length === 0 && <Text style={styles.wait}>Waiting for GPS signal...</Text>}
-        <TouchableOpacity style={styles.stopBtn} onPress={stop} disabled={stopping}>
-          {stopping ? <ActivityIndicator color="#fff" /> : <Text style={styles.stopText}>Stop Recovery</Text>}
+
+        {/* Live Metrics */}
+        <View style={styles.metricsGrid}>
+          <View style={styles.metricCard}>
+            <Text style={styles.metricLabel}>ELAPSED TIME</Text>
+            <Text style={styles.metricValue}>{formatDuration(seconds)}</Text>
+          </View>
+          <View style={styles.metricCard}>
+            <Text style={styles.metricLabel}>DISTANCE</Text>
+            <Text style={styles.metricValue}>{formatDistance(meters)}</Text>
+          </View>
+        </View>
+
+        {/* Stop Recovery Button */}
+        <TouchableOpacity style={styles.stopBtn} onPress={stop} disabled={stopping} activeOpacity={0.85}>
+          {stopping ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <View style={styles.stopBtnContent}>
+              <Ionicons name="stop-circle" size={22} color="#fff" style={{ marginRight: 8 }} />
+              <Text style={styles.stopText}>STOP RECOVERY</Text>
+            </View>
+          )}
         </TouchableOpacity>
       </View>
     </View>
@@ -215,15 +241,41 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#f3f4f6' },
+  container: { flex: 1, backgroundColor: '#0F172A' },
   map: { flex: 1 },
-  panel: { backgroundColor: '#fff', padding: 16, borderTopLeftRadius: 16, borderTopRightRadius: 16 },
-  name: { fontSize: 18, fontWeight: '700', marginBottom: 10 },
-  row: { flexDirection: 'row', marginBottom: 8 },
-  stat: { flex: 1 },
-  statValue: { fontSize: 24, fontWeight: '700' },
-  statLabel: { color: '#666' },
-  wait: { color: '#b45309', marginBottom: 8 },
-  stopBtn: { backgroundColor: '#b91c1c', padding: 16, borderRadius: 10, alignItems: 'center', marginTop: 8 },
-  stopText: { color: '#fff', fontSize: 17, fontWeight: '700' },
+  panel: {
+    backgroundColor: '#FFFFFF', padding: 20,
+    borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    shadowColor: '#000', shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.1, shadowRadius: 12, elevation: 8,
+  },
+  topInfoRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    marginBottom: 14,
+  },
+  modeBadge: {
+    flexDirection: 'row', alignItems: 'center', backgroundColor: '#EFF6FF',
+    paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8,
+    borderWidth: 1, borderColor: '#BFDBFE',
+  },
+  modeBadgeText: { fontSize: 12, fontWeight: '800', color: '#1E40AF', textTransform: 'uppercase' },
+  vehicleNumberText: { fontSize: 13, fontWeight: '700', color: '#334155' },
+  gpsIndicator: { flexDirection: 'row', alignItems: 'center' },
+  gpsDot: { width: 8, height: 8, borderRadius: 4, marginRight: 6 },
+  gpsText: { fontSize: 11, fontWeight: '600', color: '#64748B' },
+  metricsGrid: { flexDirection: 'row', gap: 12, marginBottom: 14 },
+  metricCard: {
+    flex: 1, backgroundColor: '#F8FAFC', borderRadius: 12,
+    padding: 12, borderWidth: 1, borderColor: '#E2E8F0',
+  },
+  metricLabel: { fontSize: 10, fontWeight: '700', color: '#64748B', letterSpacing: 0.5 },
+  metricValue: { fontSize: 22, fontWeight: '800', color: '#0F172A', marginTop: 2 },
+  stopBtn: {
+    backgroundColor: '#DC2626', height: 54, borderRadius: 12,
+    justifyContent: 'center', alignItems: 'center',
+    shadowColor: '#DC2626', shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25, shadowRadius: 8, elevation: 4,
+  },
+  stopBtnContent: { flexDirection: 'row', alignItems: 'center' },
+  stopText: { color: '#fff', fontSize: 16, fontWeight: '800', letterSpacing: 0.5 },
 });
