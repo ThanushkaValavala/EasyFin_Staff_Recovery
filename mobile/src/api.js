@@ -1,4 +1,4 @@
-import { File } from 'expo-file-system';
+﻿import { File } from 'expo-file-system';
 import * as SecureStore from 'expo-secure-store';
 import { API_URL } from './config';
 
@@ -10,7 +10,7 @@ async function request(method, path, body) {
 
   // 10-second timeout so a sleeping Render instance doesn't hang the UI
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 10000);
+  const timer = setTimeout(() => ctrl.abort(), 60000);
 
   let res;
   try {
@@ -39,7 +39,7 @@ async function request(method, path, body) {
   const data = await res.json().catch(() => ({}));
 
   if (!res.ok) {
-    // 5xx from a sleeping/broken backend → treat as network error
+    // 5xx from a sleeping/broken backend â†’ treat as network error
     if (res.status >= 500) {
       const e = new Error('Network request failed');
       e.isNetworkError = true;
@@ -111,4 +111,55 @@ export async function apiUploadFile(path, fields, fieldName, fileUri) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+export async function apiUploadFiles(path, fields, filesMap) {
+  const token = await SecureStore.getItemAsync('token');
+  const form = new FormData();
+  Object.entries(fields || {}).forEach(([k, v]) => {
+    if (v === undefined || v === null) return;
+    form.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+  });
+  Object.entries(filesMap || {}).forEach(([fieldName, fileUri]) => {
+    if (fileUri) {
+      form.append(fieldName, new File(fileUri));
+    }
+  });
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 120000);
+  try {
+    const res = await fetch(`${API_URL}${path}`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: form,
+      signal: ctrl.signal,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error(data.message || 'Upload failed');
+      err.status = res.status;
+      err.data = data;
+      throw err;
+    }
+    return data;
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error('Network request failed');
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function warmUpServer() {
+  const base = API_URL.replace(/\/api\/v1\/?$/, '');
+  for (let i = 0; i < 3; i++) {
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 60000);
+      const r = await fetch(`${base}/api/health`, { signal: ctrl.signal });
+      clearTimeout(t);
+      if (r.ok) return true;
+    } catch (e) {}
+  }
+  return false;
 }

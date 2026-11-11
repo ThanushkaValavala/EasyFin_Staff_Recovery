@@ -56,12 +56,14 @@ export default function CompleteScreen({ route, navigation }) {
     endLocation,
     transportMode,
     vehicleNumber,
+    startPhotoUri,
+    allPoints,
   } = route.params || {};
 
   const sessionId = (session && (session.sessionId || session._id)) || `SESS-${Date.now()}`;
   const rawMode = (transportMode || session?.vehicleType || 'WALK').toUpperCase();
 
-  // WALK and CYCLE do not require ending photo
+  // WALK and OTHER do not require ending photo; BIKE and CAR require it
   const needsEndPhoto = rawMode === 'BIKE' || rawMode === 'CAR';
 
   const [photo, setPhoto] = useState(null);
@@ -111,7 +113,7 @@ export default function CompleteScreen({ route, navigation }) {
   // Validation:
   // ALL modes: Remarks mandatory
   // BIKE/CAR: Ending speedometer photo mandatory
-  // WALK/CYCLE: No photo needed
+  // WALK/OTHER: No photo needed
   const canEndRecovery = (() => {
     if (!remarks.trim()) return false;
     if (needsEndPhoto && !photo) return false;
@@ -143,7 +145,7 @@ export default function CompleteScreen({ route, navigation }) {
 
     try {
       if (!needsEndPhoto) {
-        // WALK / CYCLE: JSON finish endpoint
+        // WALK / OTHER: JSON finish endpoint
         await apiPost(`/recovery/sessions/${sessionId}/finish-walk`, {
           remarks: remarks.trim(),
           distanceMeters: Math.round(dist || 0),
@@ -185,14 +187,17 @@ export default function CompleteScreen({ route, navigation }) {
         try {
           const { nlpSummary, nlpCategory } = summarize(remarks.trim());
           await savePendingSession({
-            deviceSessionId: sessionId,
-            sessionId,
+            deviceSessionId: session?.deviceSessionId || sessionId,
+            sessionId: session?.sessionId || sessionId,
+            agentId: session?.agentId,
+            staffId: session?.staffId,
             assignmentId: session?.assignmentId,
             customerId: session?.customerId,
             loanId: session?.loanId,
             startTime: session?.startTime || session?.startedAt || new Date().toISOString(),
             endTime: new Date().toISOString(),
             status: 'COMPLETED',
+            transportMode: rawMode,
             vehicleType: rawMode,
             vehicleNumber: vehicleNumber || session?.vehicleNumber || '',
             durationSeconds: Math.round(durationSeconds || 0),
@@ -201,9 +206,11 @@ export default function CompleteScreen({ route, navigation }) {
             rawRemarks: remarks.trim(),
             nlpSummary,
             nlpCategory,
-            startLocation: startLocation || null,
+            startLocation: startLocation || session?.startLocation || null,
             endLocation: end || null,
+            startPhotoUri: startPhotoUri || session?.startPhotoUri || null,
             endPhotoUri: needsEndPhoto ? (photo || null) : null,
+            points: allPoints || [],
             _syncStatus: 'PENDING',
           });
 
@@ -214,7 +221,7 @@ export default function CompleteScreen({ route, navigation }) {
             [{ text: 'OK', onPress: () => navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] }) }]
           );
         } catch (saveErr) {
-          Alert.alert('Error', 'Could not save recovery locally. Please check storage and try again.');
+          Alert.alert('Error', 'Could not save recovery locally: ' + (saveErr.message || 'Storage error'));
         }
       } else {
         Alert.alert('Submission Error', e.message || 'Could not complete the recovery. Please try again.');
@@ -224,8 +231,8 @@ export default function CompleteScreen({ route, navigation }) {
     }
   };
 
-  const modeIcon = rawMode === 'BIKE' || rawMode === 'CYCLE' ? 'bicycle-outline' : rawMode === 'CAR' ? 'car-outline' : 'walk-outline';
-  const modeColor = rawMode === 'BIKE' || rawMode === 'CAR' ? '#7C3AED' : rawMode === 'CYCLE' ? '#0284C7' : '#059669';
+  const modeIcon = rawMode === 'BIKE' ? 'bicycle-outline' : rawMode === 'CAR' ? 'car-outline' : rawMode === 'OTHER' ? 'bus-outline' : 'walk-outline';
+  const modeColor = rawMode === 'BIKE' || rawMode === 'CAR' ? '#7C3AED' : rawMode === 'OTHER' ? '#0284C7' : '#059669';
 
   return (
     <ScrollView
@@ -301,7 +308,7 @@ export default function CompleteScreen({ route, navigation }) {
           <View style={styles.naCard}>
             <Ionicons name="checkmark-circle" size={20} color="#059669" style={{ marginRight: 8 }} />
             <Text style={styles.naText}>
-              Not required for {rawMode === 'WALK' ? 'Walking' : 'Cycle'} mode
+              Not required for {rawMode === 'WALK' ? 'Walking' : 'Other'} mode
             </Text>
           </View>
         ) : photo ? (

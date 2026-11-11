@@ -10,32 +10,47 @@ export function distanceMeters(a, b) {
   return 2 * R * Math.asin(Math.sqrt(h));
 }
 
-// NEW: Filter out GPS drift and jumps
+// NEW: Filter out GPS drift, jumps, and stationary jitter based on precise accuracy and speed rules
 export function isValidMovement(prev, next) {
-  if (!prev || !next) return false;
+  if (!next) return false;
 
-  // 1. Reject if the new point has very poor accuracy (worse than 30 meters)
-  if (next.accuracy > 30) return false;
+  // 1. Reject any point with accuracy > 20 m
+  const nextAcc = typeof next.accuracy === 'number' ? next.accuracy : 10;
+  if (nextAcc > 20) return false;
+
+  // Accept the first point only if accuracy <= 20
+  if (!prev) return true;
 
   const dist = distanceMeters(prev, next);
-  const timeDiffSeconds = (new Date(next.timestamp).getTime() - new Date(prev.timestamp).getTime()) / 1000;
+  const prevTime = prev.timestamp ? new Date(prev.timestamp).getTime() : 0;
+  const nextTime = next.timestamp ? new Date(next.timestamp).getTime() : 0;
+  const timeDiffSeconds = prevTime && nextTime ? (nextTime - prevTime) / 1000 : 0;
 
-  // 2. If they are the same time, reject
-  if (timeDiffSeconds <= 0) return false;
+  // 2. Reject segments where distance / time > 45 m/s
+  if (timeDiffSeconds > 0) {
+    const calcSpeed = dist / timeDiffSeconds;
+    if (calcSpeed > 45) return false;
+  } else if (timeDiffSeconds <= 0 && prevTime && nextTime && dist > 0) {
+    return false;
+  }
 
-  // 3. Reject impossible GPS jumps (Speed limit check)
-  // If the calculated speed is > 40 m/s (144 km/h), they are in a vehicle, but it's likely a GPS jump.
-  const speed = dist / timeDiffSeconds;
-  if (speed > 40) return false;
+  const speed = typeof next.speed === 'number' ? next.speed : 0;
 
-  // 4. Reject small noise when standing still
-  // The threshold is based on the GPS accuracy (error margin). 
-  // If they moved less than the error margin of the GPS, it's just noise.
-  const driftThreshold = Math.max(prev.accuracy, next.accuracy) * 0.8;
-  if (dist < driftThreshold) return false;
+  // 3. Stationary handling: if speed < 0.3 m/s and the movement is less than the accuracy,
+  // add 0 and do not move the anchor point.
+  if (speed < 0.3 && dist < nextAcc) {
+    return false;
+  }
 
-  // 5. Reject small jumps based on time (if less than 1 meter per second and under 5 meters)
-  if (dist < 5 && speed < 1.5) return false;
+  // 4. Movement check: count the segment only if distance > max(2 m, 0.5 x accuracy)
+  // OR the GPS-reported speed (coords.speed) is > 0.5 m/s. Reject segments where distance / time > 45 m/s.
+  // Do not drop slow walking.
+  const meetsDist = dist > Math.max(2, 0.5 * nextAcc);
+  const meetsSpeed = speed > 0.5;
+
+  if (!meetsDist && !meetsSpeed) {
+    return false;
+  }
 
   return true;
 }

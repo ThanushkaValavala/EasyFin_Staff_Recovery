@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
   ActivityIndicator, StyleSheet, KeyboardAvoidingView, Platform, Alert,
@@ -6,7 +6,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
-import { apiPost } from '../api';
+import { apiPost, warmUpServer } from '../api';
 
 // ─── Helpers to detect transient/connectivity errors ──────────────────────
 function isNetworkError(e) {
@@ -38,6 +38,7 @@ function verifyLocalOtp(phone, otp) {
 }
 
 export default function LoginScreen({ navigation }) {
+  useEffect(() => { warmUpServer(); }, []);
   const [step, setStep] = useState('PHONE'); // 'PHONE' | 'OTP'
   const [phone, setPhone] = useState('');
   const [otp, setOtp] = useState('');
@@ -62,13 +63,10 @@ export default function LoginScreen({ navigation }) {
       setIsOfflineMode(false);
       setStep('OTP');
     } catch (e) {
-      // Any connectivity / server error → fall back to local demo OTP
+      // Any connectivity / server error → inform user to wait for server warm-up
       if (isNetworkError(e)) {
-        console.warn('[Login] Backend unreachable, using local OTP fallback. Reason:', e.message);
-        const localOtp = generateLocalOtp(trimmed);
-        setDisplayedOtp(localOtp);
-        setIsOfflineMode(true);
-        setStep('OTP');
+        console.warn('[Login] Backend unreachable, server warming up.');
+        setError('Server is waking up. Wait 30 seconds and tap Generate OTP again.');
       } else {
         // Auth-level error (e.g. 400 bad request) — show the message
         console.warn('[Login] OTP generate error (non-network):', e.status, e.message);

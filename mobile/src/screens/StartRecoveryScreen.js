@@ -29,10 +29,10 @@ const TRANSPORT_MODES = [
     requiresPhoto: false,
   },
   {
-    key: 'CYCLE',
-    label: 'Cycle',
-    icon: 'bicycle-outline',
-    sub: 'No vehicle number or speedometer required',
+    key: 'OTHER',
+    label: 'Other',
+    icon: 'bus-outline',
+    sub: 'General / public transit • Start immediately',
     color: '#0284C7',
     bgColor: '#E0F2FE',
     borderColor: '#7DD3FC',
@@ -78,7 +78,7 @@ export default function StartRecoveryScreen({ route, navigation }) {
   const needsPhoto = selectedMode?.requiresPhoto || false;
 
   // Validation Rules:
-  // WALK/CYCLE: Transport selected only → ready to start
+  // WALK/OTHER: Transport selected only → ready to start
   // BIKE/CAR: Valid vehicle number (>= 4 alphanumeric) AND camera image
   const canStart = (() => {
     if (!transportMode) return false;
@@ -106,6 +106,8 @@ export default function StartRecoveryScreen({ route, navigation }) {
   };
 
   const start = async () => {
+    console.log('[StartRecovery] START_BUTTON_PRESSED', { transportMode, needsVehicle, hasPhoto: !!photo });
+
     setError('');
     if (!transportMode) {
       setError('Please select a transport mode.');
@@ -128,25 +130,65 @@ export default function StartRecoveryScreen({ route, navigation }) {
     }
 
     setLoading(true);
+
+    // ── Declared outside try so catch/offline-fallback can always access it ──
+    let initialLocation = null;
+
     try {
-      // Request location permission
+      // ── Step 1: Location permission ────────────────────────────────────────
       const perm = await Location.requestForegroundPermissionsAsync();
       if (perm.status !== 'granted') {
+        console.log('[StartRecovery] START_FAILED reason=location_permission_denied');
         setError('Location permission is required to track the recovery route. Please enable it in device settings.');
         setLoading(false);
         return;
       }
+      console.log('[StartRecovery] LOCATION_PERMISSION_GRANTED');
 
-      const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
-      const initialLocation = {
+      // ── Step 2: GPS acquisition with 15-second hard timeout ────────────────
+      console.log('[StartRecovery] GPS_ACQUISITION_STARTED');
+      const GPS_TIMEOUT_MS = 15000;
+
+      let pos;
+      try {
+        pos = await Promise.race([
+          Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }),
+          new Promise((_, reject) =>
+            setTimeout(
+              () => reject(new Error('GPS_TIMEOUT')),
+              GPS_TIMEOUT_MS
+            )
+          ),
+        ]);
+      } catch (gpsErr) {
+        if (gpsErr.message === 'GPS_TIMEOUT') {
+          console.log('[StartRecovery] START_FAILED reason=gps_timeout');
+          setError('GPS signal could not be obtained within 15 seconds. Move to an open area and try again.');
+        } else {
+          console.log('[StartRecovery] START_FAILED reason=gps_error message=' + gpsErr.message);
+          setError('Could not obtain your current location. Please check GPS settings and try again.');
+        }
+        setLoading(false);
+        return;
+      }
+
+      initialLocation = {
         latitude: pos.coords.latitude,
         longitude: pos.coords.longitude,
         accuracy: pos.coords.accuracy || 0,
       };
+      console.log('[StartRecovery] GPS_ACQUISITION_SUCCESS', {
+        lat: initialLocation.latitude.toFixed(5),
+        lng: initialLocation.longitude.toFixed(5),
+        accuracy: initialLocation.accuracy,
+      });
+
+      // ── Step 3: API call ───────────────────────────────────────────────────
+      console.log('[StartRecovery] API_REQUEST_STARTED', { vehicleType: transportMode, deviceSessionId });
 
       let data;
       if (!needsPhoto) {
-        // WALK / CYCLE: JSON start
+        // WALK / OTHER: plain JSON start
         data = await apiPost('/recovery/start-with-photo', {
           vehicleType: transportMode,
           vehicleNumber: '',
@@ -154,7 +196,7 @@ export default function StartRecoveryScreen({ route, navigation }) {
           deviceSessionId,
         });
       } else {
-        // BIKE / CAR: multipart with starting speedometer
+        // BIKE / CAR: multipart with starting speedometer photo
         data = await apiUploadFile(
           '/recovery/start-with-photo',
           {
@@ -168,6 +210,8 @@ export default function StartRecoveryScreen({ route, navigation }) {
         );
       }
 
+      console.log('[StartRecovery] API_REQUEST_SUCCESS', { sessionId: data?.session?.sessionId });
+
       const createdSession = (data && data.session) ? data.session : {
         sessionId: deviceSessionId,
         deviceSessionId,
@@ -177,13 +221,19 @@ export default function StartRecoveryScreen({ route, navigation }) {
         startTime: new Date().toISOString(),
       };
 
+      console.log('[StartRecovery] NAVIGATING_TO_ACTIVE_RECOVERY', { sessionId: createdSession.sessionId });
       navigation.replace('ActiveRecovery', {
         session: createdSession,
         transportMode,
         vehicleNumber: needsVehicle ? vehicleNumber.trim().toUpperCase() : '',
+        startPhotoUri: photo || createdSession.startPhotoUri || null,
       });
+
     } catch (e) {
+      // ── 409: existing active session — offer Resume ────────────────────────
       if (e.status === 409 && e.data && e.data.session) {
+        console.log('[StartRecovery] START_FAILED reason=active_session_exists sessionId=' + e.data.session.sessionId);
+        setLoading(false);
         Alert.alert(
           'Recovery Already Active',
           'You already have an active recovery session in progress.',
@@ -191,39 +241,64 @@ export default function StartRecoveryScreen({ route, navigation }) {
             { text: 'Cancel', style: 'cancel' },
             {
               text: 'Resume',
-              onPress: () =>
+              onPress: () => {
+                console.log('[StartRecovery] NAVIGATING_TO_ACTIVE_RECOVERY reason=resume', { sessionId: e.data.session.sessionId });
                 navigation.replace('ActiveRecovery', {
                   session: e.data.session,
                   transportMode: e.data.session.vehicleType || transportMode,
                   vehicleNumber: e.data.session.vehicleNumber || '',
-                }),
+                  startPhotoUri: photo || null,
+                });
+              },
             },
           ]
         );
         return;
       }
 
-      // Backend unreachable → start offline
+      // ── 4xx client / validation error — show message, do NOT go offline ───
+      if (e.status && e.status >= 400 && e.status < 500) {
+        console.log('[StartRecovery] START_FAILED reason=client_error status=' + e.status + ' message=' + e.message);
+        setError(e.message || 'Request was rejected by the server. Please check your details.');
+        setLoading(false);
+        return;
+      }
+
+      // ── Network / server error — offline fallback ──────────────────────────
       if (e.isNetworkError || e.message === 'Network request failed' || (e.status && e.status >= 500)) {
-        console.warn('[StartRecovery] Backend unreachable — starting offline session');
+        console.log('[StartRecovery] OFFLINE_FALLBACK', {
+          reason: e.message,
+          status: e.status || 'no_status',
+          hasLocation: !!initialLocation,
+        });
+
         const offlineSession = {
           sessionId: deviceSessionId,
           deviceSessionId,
           vehicleType: transportMode,
           vehicleNumber: needsVehicle ? vehicleNumber.trim().toUpperCase() : '',
           startTime: new Date().toISOString(),
-          startPhotoUri: photo,
+          // initialLocation is always available here because GPS succeeded before the API call.
+          // If GPS failed we would have returned early above, never reaching this catch block.
+          startLocation: initialLocation,
+          startPhotoUri: photo || null,
           _syncStatus: 'PENDING',
         };
+
+        console.log('[StartRecovery] NAVIGATING_TO_ACTIVE_RECOVERY reason=offline_fallback', { sessionId: deviceSessionId });
         navigation.replace('ActiveRecovery', {
           session: offlineSession,
           transportMode,
           vehicleNumber: needsVehicle ? vehicleNumber.trim().toUpperCase() : '',
+          startPhotoUri: photo || null,
         });
         return;
       }
 
+      // ── Unexpected error ───────────────────────────────────────────────────
+      console.log('[StartRecovery] START_FAILED reason=unexpected message=' + e.message);
       setError(e.message || 'Could not start recovery. Please try again.');
+
     } finally {
       setLoading(false);
     }

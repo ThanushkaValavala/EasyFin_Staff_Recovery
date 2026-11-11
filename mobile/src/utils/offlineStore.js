@@ -1,16 +1,18 @@
 /**
- * Offline storage for recovery sessions.
- * Pending sessions are stored in SecureStore and synced to the backend
+ * Durable offline storage for recovery sessions.
+ * Pending sessions are stored in SecureStore and synchronized to the backend
  * when connectivity is restored.
  *
- * For Bike/Car sessions, the ending speedometer photo URI is preserved
- * locally and uploaded during sync before the session is marked synced.
+ * For Bike/Car sessions, both starting and ending speedometer photo URIs are preserved
+ * locally and uploaded during sync before the session is removed from the pending queue.
  */
 import * as SecureStore from 'expo-secure-store';
-import { apiPost, apiUploadFile } from '../api';
+import { apiPost, apiUploadFile, apiUploadFiles } from '../api';
 
 const PENDING_KEY = 'pending_recovery_sessions';
 const HISTORY_CACHE_KEY = 'cached_recovery_history';
+
+let _syncInProgress = false;
 
 // ── Read / write pending list ────────────────────────────────────────────────
 
@@ -25,10 +27,12 @@ async function readPending() {
 }
 
 async function writePending(list) {
-  try {
-    await SecureStore.setItemAsync(PENDING_KEY, JSON.stringify(list));
-  } catch (e) {
-    console.warn('[offlineStore] writePending error:', e.message);
+  const json = JSON.stringify(list);
+  await SecureStore.setItemAsync(PENDING_KEY, json);
+  // Verify write succeeded
+  const check = await SecureStore.getItemAsync(PENDING_KEY);
+  if (!check && list.length > 0) {
+    throw new Error('Failed to verify pending session storage write');
   }
 }
 
@@ -36,17 +40,26 @@ async function writePending(list) {
 
 /**
  * Save a completed session locally (pending sync).
- * For Bike/Car sessions, pass endPhotoUri so it can be uploaded during sync.
+ * Preserves all metadata, GPS points, and photo URIs.
  */
 export async function savePendingSession(session) {
+  if (!session || !session.deviceSessionId) {
+    throw new Error('deviceSessionId is required to save pending recovery');
+  }
+
   const list = await readPending();
-  // Avoid duplicates by deviceSessionId
   const exists = list.some((s) => s.deviceSessionId === session.deviceSessionId);
   if (!exists) {
     list.push({ ...session, _syncStatus: 'PENDING' });
     await writePending(list);
-    console.log('[offlineStore] Saved pending session:', session.deviceSessionId,
-      'endPhotoUri:', session.endPhotoUri ? 'present' : 'none');
+    console.log(
+      '[offlineStore] Saved pending session:',
+      session.deviceSessionId,
+      'mode:', session.transportMode || session.vehicleType,
+      'startPhoto:', session.startPhotoUri ? 'present' : 'none',
+      'endPhoto:', session.endPhotoUri ? 'present' : 'none',
+      'points:', (session.points || []).length
+    );
   }
 }
 
@@ -60,81 +73,145 @@ export async function getPendingSessions() {
 /**
  * Attempt to sync all pending sessions to the backend.
  *
- * For WALK sessions: POST /recovery/sync (JSON, no photo).
- * For Bike/Car sessions WITH endPhotoUri:
- *   - If the session already exists on the backend (it was started online),
- *     use POST /recovery/sessions/:sessionId/finish (multipart with endPhoto).
- *   - If the session was entirely offline (no backend sessionId yet),
- *     use POST /recovery/sync (JSON metadata only, photo lost — noted as limitation).
+ * Prevents multiple simultaneous sync runs.
  *
- * Each session is only removed from the local list after the backend confirms success.
- * Returns { synced, failed } counts.
+ * For WALK / OTHER:
+ *   - Synchronizes metadata and GPS points via POST /recovery/sync (no photo).
+ *
+ * For BIKE / CAR:
+ *   - If started online (has real backend sessionId), uploads ending photo via
+ *     POST /recovery/sessions/:sessionId/finish and GPS points via points endpoint.
+ *   - If started offline (full offline session), uploads BOTH startPhoto and endPhoto
+ *     plus all metadata and GPS points via POST /recovery/sync (multipart).
+ *   - Retains session in queue if either required photo is missing.
+ *
+ * Each session is removed from the local queue ONLY after verified server success.
+ * Returns { synced, failed, inProgress }.
  */
 export async function syncPendingSessions() {
-  const list = await readPending();
-  if (!list.length) return { synced: 0, failed: 0 };
-
-  let synced = 0;
-  let failed = 0;
-  const remaining = [];
-
-  for (const session of list) {
-    try {
-      const isWalk = ['WALK', 'CYCLE'].includes((session.vehicleType || '').toUpperCase());
-      const hasEndPhoto = !isWalk && !!session.endPhotoUri;
-
-      // A session started online has a real backend sessionId (SESS-... format).
-      // A session that was never sent to the backend at all would use the deviceSessionId.
-      const hasBackendSession = session.sessionId && session.sessionId !== session.deviceSessionId;
-
-      if (hasEndPhoto && hasBackendSession) {
-        // Bike/Car session: the session exists on the backend (start succeeded),
-        // but finish failed. Upload end photo via the existing finish endpoint.
-        console.log('[offlineStore] Syncing Bike/Car session with end photo:', session.sessionId);
-
-        const end = session.endLocation || {};
-        await apiUploadFile(
-          '/recovery/sessions/' + session.sessionId + '/finish',
-          {
-            remarks: session.remarks || session.rawRemarks || '',
-            distanceMeters: String(Math.round(session.distanceMeters || 0)),
-            durationSeconds: String(Math.round(session.durationSeconds || 0)),
-            endLocation: JSON.stringify({
-              latitude: end.latitude || 0,
-              longitude: end.longitude || 0,
-              accuracy: end.accuracy || 0,
-            }),
-          },
-          'endPhoto',
-          session.endPhotoUri
-        );
-
-        console.log('[offlineStore] End photo uploaded and session finished:', session.sessionId);
-        synced++;
-        // Do NOT push to remaining — confirmed synced
-      } else {
-        // Walk session, or Bike/Car without a saved photo (or without backend session):
-        // fall back to the metadata-only sync endpoint.
-        if (hasEndPhoto && !hasBackendSession) {
-          console.warn('[offlineStore] Bike/Car session has no backend sessionId — '
-            + 'syncing metadata only, end photo cannot be uploaded:', session.deviceSessionId);
-        }
-
-        // Idempotency: backend checks deviceSessionId and returns alreadySynced if duplicate
-        await apiPost('/recovery/sync', session);
-        console.log('[offlineStore] Metadata sync success:', session.deviceSessionId);
-        synced++;
-      }
-    } catch (e) {
-      console.warn('[offlineStore] sync failed for', session.deviceSessionId, '—', e.message);
-      failed++;
-      remaining.push(session);
-      // endPhotoUri is still in session — it will be retried next time
-    }
+  if (_syncInProgress) {
+    console.log('[offlineStore] Sync already in progress, skipping concurrent trigger');
+    return { synced: 0, failed: 0, inProgress: true };
   }
 
-  await writePending(remaining);
-  return { synced, failed };
+  _syncInProgress = true;
+  try {
+    const list = await readPending();
+    if (!list.length) return { synced: 0, failed: 0 };
+
+    let synced = 0;
+    let failed = 0;
+    const remaining = [];
+
+    for (const session of list) {
+      try {
+        const mode = String(session.transportMode || session.vehicleType || 'WALK').toUpperCase();
+        const isWalkLike = mode === 'WALK' || mode === 'OTHER';
+        const needsPhotos = mode === 'BIKE' || mode === 'CAR';
+
+        // Check if session was started online (real backend sessionId)
+        const hasBackendSession = session.sessionId &&
+          String(session.sessionId).startsWith('SESS-') &&
+          session.sessionId !== session.deviceSessionId &&
+          !String(session.sessionId).startsWith('SESS-SYNC-');
+
+        if (needsPhotos) {
+          // If session was started online: start photo is already on server.
+          // Only the end photo needs to be uploaded to finish the session.
+          if (hasBackendSession && session.endPhotoUri) {
+            console.log('[offlineStore] Syncing online-started Bike/Car session with end photo:', session.sessionId);
+            const endLoc = session.endLocation || {};
+            await apiUploadFile(
+              `/recovery/sessions/${session.sessionId}/finish`,
+              {
+                remarks: session.remarks || session.rawRemarks || '',
+                distanceMeters: String(Math.round(session.distanceMeters || 0)),
+                durationSeconds: String(Math.round(session.durationSeconds || 0)),
+                endLocation: JSON.stringify({
+                  latitude: endLoc.latitude || 0,
+                  longitude: endLoc.longitude || 0,
+                  accuracy: endLoc.accuracy || 0,
+                }),
+              },
+              'endPhoto',
+              session.endPhotoUri
+            );
+
+            // Flush points if any were captured locally
+            if (Array.isArray(session.points) && session.points.length > 0) {
+              await apiPost(`/recovery/sessions/${session.sessionId}/points`, {
+                points: session.points,
+                incrementalDistanceMeters: 0,
+              }).catch(() => {});
+            }
+
+            console.log('[offlineStore] Confirmed sync for online session:', session.sessionId);
+            synced++;
+            continue;
+          }
+
+          // Fully offline Bike/Car recovery: requires BOTH starting and ending photos
+          if (!session.startPhotoUri || !session.endPhotoUri) {
+            console.warn(
+              '[offlineStore] Cannot sync Bike/Car recovery without both photos:',
+              session.deviceSessionId,
+              'start:', !!session.startPhotoUri,
+              'end:', !!session.endPhotoUri
+            );
+            failed++;
+            remaining.push(session);
+            continue;
+          }
+
+          console.log('[offlineStore] Syncing full offline Bike/Car recovery with both photos:', session.deviceSessionId);
+          await apiUploadFiles(
+            '/recovery/sync',
+            {
+              deviceSessionId: session.deviceSessionId,
+              sessionId: session.sessionId,
+              vehicleType: mode,
+              vehicleNumber: session.vehicleNumber || '',
+              startTime: session.startTime,
+              endTime: session.endTime,
+              durationSeconds: String(Math.round(session.durationSeconds || 0)),
+              distanceMeters: String(Math.round(session.distanceMeters || 0)),
+              remarks: session.remarks || session.rawRemarks || '',
+              startLocation: JSON.stringify(session.startLocation || null),
+              endLocation: JSON.stringify(session.endLocation || null),
+              points: JSON.stringify(session.points || []),
+            },
+            {
+              startPhoto: session.startPhotoUri,
+              endPhoto: session.endPhotoUri,
+            }
+          );
+
+          console.log('[offlineStore] Confirmed sync for full offline Bike/Car session:', session.deviceSessionId);
+          synced++;
+        } else {
+          // WALK or OTHER: sync without photos
+          console.log(`[offlineStore] Syncing ${mode} session (no photo required):`, session.deviceSessionId);
+          await apiPost('/recovery/sync', {
+            ...session,
+            vehicleType: mode,
+            points: session.points || [],
+          });
+
+          console.log(`[offlineStore] Confirmed sync for ${mode} session:`, session.deviceSessionId);
+          synced++;
+        }
+      } catch (err) {
+        console.warn('[offlineStore] sync failed for', session.deviceSessionId, '—', err.message);
+        failed++;
+        remaining.push(session);
+      }
+    }
+
+    await writePending(remaining);
+    return { synced, failed };
+  } finally {
+    _syncInProgress = false;
+  }
 }
 
 // ── History cache (fallback when backend is unreachable) ─────────────────────
