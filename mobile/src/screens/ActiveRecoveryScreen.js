@@ -2,10 +2,31 @@ import { useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator } from 'react-native';
 import { WebView } from 'react-native-webview';
 import * as Location from 'expo-location';
+import * as TaskManager from 'expo-task-manager';
 import { useKeepAwake } from 'expo-keep-awake';
 import { Ionicons } from '@expo/vector-icons';
 import { apiPost } from '../api';
-import { distanceMeters, formatDistance, formatDuration, isValidMovement } from '../utils/geo';
+import { distanceMeters, formatDistance, formatDuration, getProfile } from '../utils/geo';
+
+const LOCATION_TASK_NAME = 'EASYFIN_BACKGROUND_LOCATION_TASK';
+
+let globalLocationListener = null;
+
+if (!TaskManager.isTaskDefined(LOCATION_TASK_NAME)) {
+  TaskManager.defineTask(LOCATION_TASK_NAME, ({ data, error }) => {
+    if (error) {
+      console.warn('[BackgroundLocation] Task error:', error);
+      return;
+    }
+    if (data && data.locations && Array.isArray(data.locations)) {
+      for (const loc of data.locations) {
+        if (typeof globalLocationListener === 'function') {
+          globalLocationListener(loc);
+        }
+      }
+    }
+  });
+}
 
 const MAP_HTML = `<!DOCTYPE html><html><head>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
@@ -40,18 +61,30 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
   const localStartMsRef = useRef(Date.now());
   const localStartIsoRef = useRef(new Date(localStartMsRef.current).toISOString());
 
+  // Resolve mode & profile: Mode comes from transportMode, then session.vehicleType, then WALK
+  const effectiveMode = (transportMode || session?.vehicleType || 'WALK').toUpperCase().trim();
+  const profile = getProfile(effectiveMode);
+
   const [path, setPath] = useState([]);
   const [meters, setMeters] = useState(0);
   const [seconds, setSeconds] = useState(0);
   const [latestAccuracy, setLatestAccuracy] = useState(null);
+  const [isWeakGps, setIsWeakGps] = useState(false);
+  const [hasStartedCounting, setHasStartedCounting] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [mapReady, setMapReady] = useState(false);
 
   const pathRef = useRef([]);
   const metersRef = useRef(0);
+  const movingSecondsRef = useRef(0);
   const pendingRef = useRef([]);
   const pendingMetersRef = useRef(0);
   const recentPointsRef = useRef([]);
+  const consecutiveAcceptedRef = useRef(0);
+  const hasStartedCountingRef = useRef(false);
+  const lastAcceptedPointRef = useRef(null);
+  const lastTimestampRef = useRef(null);
+
   const watchRef = useRef(null);
   const webRef = useRef(null);
   const allowLeave = useRef(false);
@@ -68,69 +101,218 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
         points,
         incrementalDistanceMeters: Math.round(inc),
         batchId,
+        movingSeconds: Math.round(movingSecondsRef.current),
       });
     } catch (e) {
-      // Re-queue points locally if transient failure
+      // Re-queue points locally if transient failure (offline save)
       pendingRef.current = points.concat(pendingRef.current);
       pendingMetersRef.current += inc;
     }
   };
 
   const addPoint = (p) => {
-    // Point gating in addPoint: reject any point with accuracy > 20 m. Accept the first point only if accuracy <= 20.
-    if (!p || p.accuracy == null || p.accuracy > 20) return;
+    if (!p) return;
 
-    // Smoothing: keep the last 3 accepted points and use their average position as the candidate point (a simple moving average)
-    const candidateBuffer = [...recentPointsRef.current, p].slice(-3);
-    const count = candidateBuffer.length;
-    const avgLat = candidateBuffer.reduce((sum, pt) => sum + pt.latitude, 0) / count;
-    const avgLng = candidateBuffer.reduce((sum, pt) => sum + pt.longitude, 0) / count;
+    // Deduplicate identical timestamps between foreground watch and background task
+    if (p.timestamp && lastTimestampRef.current === p.timestamp) {
+      return;
+    }
+    lastTimestampRef.current = p.timestamp;
 
-    const candidate = {
-      ...p,
-      latitude: avgLat,
-      longitude: avgLng,
-      pointId: p.pointId || ('PT_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8)),
-    };
+    if (p.accuracy != null) {
+      setLatestAccuracy(p.accuracy);
+    }
+
+    // 1. Reject any point whose accuracy exceeds the profile's maxAcc
+    if (p.accuracy == null || p.accuracy > profile.maxAcc) {
+      setIsWeakGps(true);
+      if (!hasStartedCountingRef.current) {
+        consecutiveAcceptedRef.current = 0;
+        recentPointsRef.current = [];
+      }
+      return;
+    }
+
+    // Point accepted within profile accuracy
+    setIsWeakGps(false);
+    consecutiveAcceptedRef.current += 1;
+
+    // 2. Start counting only after 3 consecutive accepted points; until then show "Acquiring GPS"
+    if (!hasStartedCountingRef.current) {
+      recentPointsRef.current = [...recentPointsRef.current, p].slice(-3);
+      if (consecutiveAcceptedRef.current < 3) {
+        return;
+      }
+
+      // 3 consecutive accepted points reached! Start counting
+      hasStartedCountingRef.current = true;
+      setHasStartedCounting(true);
+
+      let initialAnchor = p;
+      if (profile.smooth) {
+        const pts = recentPointsRef.current;
+        const cnt = pts.length;
+        const avgLat = pts.reduce((sum, pt) => sum + pt.latitude, 0) / cnt;
+        const avgLng = pts.reduce((sum, pt) => sum + pt.longitude, 0) / cnt;
+        initialAnchor = {
+          ...p,
+          latitude: avgLat,
+          longitude: avgLng,
+          pointId: p.pointId || ('PT_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8)),
+        };
+      } else {
+        initialAnchor = {
+          ...p,
+          pointId: p.pointId || ('PT_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8)),
+        };
+      }
+
+      pathRef.current = [initialAnchor];
+      pendingRef.current.push(initialAnchor);
+      lastAcceptedPointRef.current = p;
+      setPath([initialAnchor]);
+      return;
+    }
+
+    // 3. If speed is known and below 0.5 m/s, add 0 and do not move the anchor
+    const isSpeedKnown = p.speed !== null && p.speed !== undefined;
+    if (isSpeedKnown && p.speed < 0.5) {
+      lastAcceptedPointRef.current = p;
+      return;
+    }
 
     const anchor = pathRef.current[pathRef.current.length - 1];
+    if (!anchor) return;
 
-    if (!anchor) {
-      recentPointsRef.current = candidateBuffer;
-      pathRef.current = [candidate];
-      pendingRef.current.push(candidate);
-      setPath([candidate]);
+    // 4. WALK: use the 3-point average and count a segment only if distance > minSegment(accuracy) and distance/time < maxSpeed
+    if (profile.method === 'position') {
+      const candidateBuffer = [...recentPointsRef.current, p].slice(-3);
+      const cnt = candidateBuffer.length;
+      const avgLat = candidateBuffer.reduce((sum, pt) => sum + pt.latitude, 0) / cnt;
+      const avgLng = candidateBuffer.reduce((sum, pt) => sum + pt.longitude, 0) / cnt;
+      const candidate = {
+        ...p,
+        latitude: avgLat,
+        longitude: avgLng,
+        pointId: p.pointId || ('PT_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8)),
+      };
+
+      const dist = distanceMeters(anchor, candidate);
+      const prevTime = anchor.timestamp ? new Date(anchor.timestamp).getTime() : 0;
+      const currTime = candidate.timestamp ? new Date(candidate.timestamp).getTime() : 0;
+      const dt = (currTime && prevTime) ? (currTime - prevTime) / 1000 : 0;
+      const calcSpeed = dt > 0 ? dist / dt : 0;
+      const minRequired = typeof profile.minSegment === 'function'
+        ? profile.minSegment(p.accuracy)
+        : Math.max(5, 1.5 * p.accuracy);
+
+      if (dist > minRequired && dt > 0 && calcSpeed < profile.maxSpeed) {
+        recentPointsRef.current = candidateBuffer;
+        lastAcceptedPointRef.current = p;
+        pathRef.current = [...pathRef.current, candidate];
+        metersRef.current += dist;
+        pendingRef.current.push(candidate);
+        pendingMetersRef.current += dist;
+
+        // Track movingSeconds (sum of dt while speed >= 0.5)
+        const effectiveSpeed = p.speed != null ? p.speed : calcSpeed;
+        if (effectiveSpeed >= 0.5) {
+          movingSecondsRef.current += dt;
+        }
+
+        setPath([...pathRef.current]);
+        setMeters(metersRef.current);
+      }
       return;
     }
 
-    // Compute distance between consecutive smoothed points with the existing distanceMeters
-    const dist = distanceMeters(anchor, candidate);
-    const timeDiffSeconds = candidate.timestamp && anchor.timestamp
-      ? (new Date(candidate.timestamp).getTime() - new Date(anchor.timestamp).getTime()) / 1000
-      : 0;
+    // 5. BIKE/CAR: add the average of the previous and current speed × dt (trapezoid),
+    // where dt comes from the GPS point timestamps and is capped at 5 s, when speed is between 0.5 and maxSpeed.
+    // If speed is null, use the Haversine distance only if it is > max(10 m, accuracy) and distance/time < maxSpeed.
+    if (profile.method === 'speed') {
+      const prevPt = lastAcceptedPointRef.current || anchor;
+      const prevTime = prevPt.timestamp ? new Date(prevPt.timestamp).getTime() : 0;
+      const currTime = p.timestamp ? new Date(p.timestamp).getTime() : 0;
+      const rawDt = (currTime && prevTime) ? (currTime - prevTime) / 1000 : 0;
+      const dt = Math.max(0, Math.min(5, rawDt));
 
-    // Reject segments where distance / time > 45 m/s
-    if (timeDiffSeconds > 0 && dist / timeDiffSeconds > 45) {
+      // Speed is between 0.5 and maxSpeed: trapezoid speed * dt
+      if (p.speed != null && p.speed >= 0.5 && p.speed <= profile.maxSpeed) {
+        const prevSpeed = (prevPt.speed != null && prevPt.speed >= 0.5) ? prevPt.speed : p.speed;
+        const avgSpeed = (prevSpeed + p.speed) / 2;
+        const incDist = avgSpeed * dt;
+
+        if (dt > 0 && incDist > 0) {
+          metersRef.current += incDist;
+          pendingMetersRef.current += incDist;
+          movingSecondsRef.current += dt;
+        }
+
+        const candidate = {
+          ...p,
+          pointId: p.pointId || ('PT_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8)),
+        };
+        pathRef.current = [...pathRef.current, candidate];
+        pendingRef.current.push(candidate);
+        lastAcceptedPointRef.current = p;
+        setPath([...pathRef.current]);
+        setMeters(metersRef.current);
+        return;
+      }
+
+      // If speed is null, use Haversine distance only if > max(10 m, accuracy) and distance/time < maxSpeed
+      if (p.speed == null) {
+        const dist = distanceMeters(anchor, p);
+        const calcSpeed = rawDt > 0 ? dist / rawDt : 0;
+
+        if (dist > Math.max(10, p.accuracy) && rawDt > 0 && calcSpeed < profile.maxSpeed) {
+          metersRef.current += dist;
+          pendingMetersRef.current += dist;
+          if (calcSpeed >= 0.5) {
+            movingSecondsRef.current += dt;
+          }
+
+          const candidate = {
+            ...p,
+            pointId: p.pointId || ('PT_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8)),
+          };
+          pathRef.current = [...pathRef.current, candidate];
+          pendingRef.current.push(candidate);
+          lastAcceptedPointRef.current = p;
+          setPath([...pathRef.current]);
+          setMeters(metersRef.current);
+          return;
+        }
+      }
       return;
     }
-
-    // Point is valid and not a speed jump; update smoothing buffer
-    recentPointsRef.current = candidateBuffer;
-
-    // Movement check & Stationary handling:
-    // - stationary handling: if speed < 0.3 m/s and movement < accuracy, add 0 and do not move anchor point
-    // - movement check: count segment only if distance > max(2 m, 0.5 x accuracy) OR speed > 0.5 m/s. Do not drop slow walking.
-    if (!isValidMovement(anchor, candidate)) {
-      return;
-    }
-
-    pathRef.current = [...pathRef.current, candidate];
-    metersRef.current += dist;
-    pendingRef.current.push(candidate);
-    pendingMetersRef.current += dist;
-    setPath([...pathRef.current]);
-    setMeters(metersRef.current);
   };
+
+  const handleIncomingLocation = (loc) => {
+    if (!loc || !loc.coords) return;
+    const c = loc.coords;
+    if (c.accuracy != null) {
+      setLatestAccuracy(c.accuracy);
+    }
+    // Pass raw GPS speed through (speed: c.speed; null stays null, -1 becomes null)
+    const rawSpeed = (c.speed != null && c.speed >= 0) ? c.speed : null;
+    addPoint({
+      latitude: c.latitude,
+      longitude: c.longitude,
+      accuracy: c.accuracy != null ? c.accuracy : 10,
+      speed: rawSpeed,
+      timestamp: loc.timestamp ? new Date(loc.timestamp).toISOString() : new Date().toISOString(),
+    });
+  };
+
+  useEffect(() => {
+    globalLocationListener = handleIncomingLocation;
+    return () => {
+      if (globalLocationListener === handleIncomingLocation) {
+        globalLocationListener = null;
+      }
+    };
+  });
 
   useEffect(() => {
     if (!mapReady || !path.length || !webRef.current) return;
@@ -154,26 +336,50 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
         Alert.alert('Location Permission Needed', 'Please allow GPS location access to track your recovery route.');
         return;
       }
-      
+
+      // Request background permission if supported
+      try {
+        if (Location.requestBackgroundPermissionsAsync) {
+          await Location.requestBackgroundPermissionsAsync();
+        }
+      } catch (e) {
+        console.warn('[Location] Background permission request error:', e);
+      }
+
+      // Start background location updates with foregroundService notification
+      try {
+        const hasStarted = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
+        if (!hasStarted) {
+          await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
+            accuracy: Location.Accuracy.BestForNavigation,
+            timeInterval: 1000,
+            distanceInterval: 1,
+            showsBackgroundLocationIndicator: true,
+            foregroundService: {
+              notificationTitle: 'EasyFin Recovery',
+              notificationBody: 'EasyFin recovery in progress',
+              notificationColor: '#1A56DB',
+            },
+            pausesLocationUpdatesAutomatically: false,
+          });
+        }
+      } catch (e) {
+        console.warn('[Location] Failed to start background location updates:', e);
+      }
+
       const sub = await Location.watchPositionAsync(
         { accuracy: Location.Accuracy.BestForNavigation, timeInterval: 1000, distanceInterval: 1 },
         (loc) => {
-          const c = loc.coords;
-          if (c.accuracy != null) {
-            setLatestAccuracy(c.accuracy);
-          }
-          addPoint({
-            latitude: c.latitude,
-            longitude: c.longitude,
-            accuracy: c.accuracy != null ? c.accuracy : 10,
-            speed: c.speed != null && c.speed > 0 ? c.speed : 0,
-            timestamp: loc.timestamp ? new Date(loc.timestamp).toISOString() : new Date().toISOString(),
-          });
+          handleIncomingLocation(loc);
         }
       );
       if (cancelled) sub.remove(); else watchRef.current = sub;
     })();
-    return () => { cancelled = true; watchRef.current?.remove(); };
+
+    return () => {
+      cancelled = true;
+      watchRef.current?.remove();
+    };
   }, []);
 
   useEffect(
@@ -188,8 +394,20 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
 
   const doStop = async () => {
     setStopping(true);
+    globalLocationListener = null;
     watchRef.current?.remove();
     watchRef.current = null;
+
+    // Stop background location updates service
+    try {
+      const hasStarted = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
+      if (hasStarted) {
+        await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
+      }
+    } catch (e) {
+      console.warn('[Location] Failed to stop background updates:', e);
+    }
+
     let end = pathRef.current[pathRef.current.length - 1];
     try {
       const cur = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.BestForNavigation });
@@ -197,13 +415,14 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
       if (cur.coords.accuracy != null) {
         setLatestAccuracy(cur.coords.accuracy);
       }
-      // Add the final fix only if its accuracy <= 20
-      if (curAcc <= 20) {
+      // Add the final fix only if its accuracy <= profile.maxAcc
+      if (curAcc <= profile.maxAcc) {
+        const rawSpeed = (cur.coords.speed != null && cur.coords.speed >= 0) ? cur.coords.speed : null;
         const p = {
           latitude: cur.coords.latitude,
           longitude: cur.coords.longitude,
           accuracy: curAcc,
-          speed: cur.coords.speed != null && cur.coords.speed > 0 ? cur.coords.speed : 0,
+          speed: rawSpeed,
           timestamp: cur.timestamp ? new Date(cur.timestamp).toISOString() : new Date().toISOString(),
         };
         addPoint(p);
@@ -222,6 +441,7 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
       startTime: localStartIsoRef.current,
       distanceMeters: metersRef.current,
       durationSeconds: exactDurationSeconds,
+      movingSeconds: Math.round(movingSecondsRef.current),
       startLocation: pathRef.current[0] || session?.startLocation || null,
       endLocation: end || pathRef.current[0] || null,
       transportMode: transportMode || session?.vehicleType || 'WALK',
@@ -237,7 +457,7 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
       { text: 'Stop Recovery', style: 'destructive', onPress: doStop },
     ]);
 
-  const modeLabel = transportMode || session?.vehicleType || 'WALK';
+  const modeLabel = effectiveMode;
 
   return (
     <View style={styles.container}>
@@ -251,11 +471,19 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
         onLoadEnd={() => setMapReady(true)}
       />
       <View style={styles.panel}>
-        {/* Header bar with Transport Mode badge */}
+        {/* Header bar with Transport Mode badge, GPS accuracy, and acquiring/active indicator */}
         <View style={styles.topInfoRow}>
           <View style={styles.modeBadge}>
             <Ionicons
-              name={modeLabel === 'WALK' ? 'walk' : modeLabel === 'OTHER' ? 'bus' : modeLabel === 'BIKE' ? 'bicycle' : 'car'}
+              name={
+                modeLabel === 'WALK'
+                  ? 'walk'
+                  : modeLabel === 'BIKE'
+                  ? 'bicycle'
+                  : modeLabel === 'OTHER'
+                  ? 'bus'
+                  : 'car'
+              }
               size={14}
               color="#2563EB"
               style={{ marginRight: 4 }}
@@ -270,33 +498,39 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
               style={[
                 styles.gpsDot,
                 {
-                  backgroundColor:
-                    latestAccuracy != null
-                      ? latestAccuracy <= 20
-                        ? '#10B981'
-                        : '#EF4444'
-                      : path.length
-                      ? '#10B981'
-                      : '#F59E0B',
+                  backgroundColor: isWeakGps
+                    ? '#EF4444'
+                    : hasStartedCounting
+                    ? '#10B981'
+                    : '#F59E0B',
                 },
               ]}
             />
             <Text style={styles.gpsText}>
-              {latestAccuracy != null
+              {!hasStartedCounting
+                ? 'Acquiring GPS'
+                : latestAccuracy != null
                 ? `GPS accuracy: ${Math.round(latestAccuracy)} m`
-                : path.length
-                ? 'GPS Active'
-                : 'Acquiring GPS'}
+                : 'GPS Active'}
             </Text>
           </View>
         </View>
 
-        {latestAccuracy != null && latestAccuracy > 20 && (
+        {/* While points are being rejected: Distance paused: weak GPS */}
+        {isWeakGps ? (
           <View style={styles.weakSignalBanner}>
             <Ionicons name="warning" size={14} color="#DC2626" style={{ marginRight: 6 }} />
-            <Text style={styles.weakSignalText}>Weak GPS signal</Text>
+            <Text style={styles.weakSignalText}>Distance paused: weak GPS</Text>
+            {latestAccuracy != null ? (
+              <Text style={styles.weakSignalAccText}>({Math.round(latestAccuracy)} m)</Text>
+            ) : null}
           </View>
-        )}
+        ) : latestAccuracy != null ? (
+          <View style={styles.accuracyBanner}>
+            <Ionicons name="navigate-circle-outline" size={13} color="#475569" style={{ marginRight: 4 }} />
+            <Text style={styles.accuracyText}>GPS accuracy: {Math.round(latestAccuracy)} m (limit: {profile.maxAcc} m)</Text>
+          </View>
+        ) : null}
 
         {/* Live Metrics */}
         <View style={styles.metricsGrid}>
@@ -337,7 +571,7 @@ const styles = StyleSheet.create({
   },
   topInfoRow: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    marginBottom: 14,
+    marginBottom: 10,
   },
   weakSignalBanner: {
     flexDirection: 'row',
@@ -354,6 +588,26 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '700',
     color: '#DC2626',
+  },
+  weakSignalAccText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#991B1B',
+    marginLeft: 4,
+  },
+  accuracyBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F1F5F9',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    marginBottom: 12,
+  },
+  accuracyText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#475569',
   },
   modeBadge: {
     flexDirection: 'row', alignItems: 'center', backgroundColor: '#EFF6FF',

@@ -10,6 +10,44 @@ export function distanceMeters(a, b) {
   return 2 * R * Math.asin(Math.sqrt(h));
 }
 
+// Mode profile configuration
+// Mode comes from transportMode, then session.vehicleType, then WALK. CYCLE and OTHER use WALK.
+export function getProfile(mode) {
+  let m = 'WALK';
+  if (typeof mode === 'string') {
+    m = mode.toUpperCase().trim();
+  } else if (mode && typeof mode === 'object') {
+    m = (mode.transportMode || mode.vehicleType || mode.mode || 'WALK').toUpperCase().trim();
+  }
+
+  if (m === 'BIKE') {
+    return {
+      maxAcc: 25,
+      maxSpeed: 20,
+      method: 'speed',
+      smooth: false,
+    };
+  }
+
+  if (m === 'CAR') {
+    return {
+      maxAcc: 30,
+      maxSpeed: 55,
+      method: 'speed',
+      smooth: false,
+    };
+  }
+
+  // CYCLE and OTHER use WALK
+  return {
+    maxAcc: 15,
+    minSegment: (acc) => Math.max(5, 1.5 * acc),
+    maxSpeed: 4,
+    method: 'position',
+    smooth: true,
+  };
+}
+
 // NEW: Filter out GPS drift, jumps, and stationary jitter based on precise accuracy and speed rules
 export function isValidMovement(prev, next) {
   if (!next) return false;
