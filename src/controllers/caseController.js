@@ -13,12 +13,12 @@ const maskCustomer = (c) => {
 
 exports.getAssignedCases = async (req, res) => {
   try {
-    const staffId = req.staff._id.toString();
+    const agentId = (req.agent && req.agent._id) || (req.staff && req.staff._id);
+    const staffId = agentId.toString();
     const { search, status, priority } = req.query;
 
     if (getIsConnected()) {
-      // We only query by staff and priority. We will filter by status manually below.
-      let query = { staffId };
+      let query = { $or: [{ agentId }, { staffId }] };
       if (priority && priority !== 'ALL') {
         query.priority = priority;
       }
@@ -352,7 +352,8 @@ exports.searchByArea = async (req, res) => {
       return res.status(503).json({ success: false, message: 'Database is not connected.' });
     }
     const q = String(req.query.q || '').trim().toLowerCase();
-    const assignments = await Assignment.find({ staffId: req.staff._id, recoveryStatus: { $ne: 'IN_PROGRESS' } })
+    const agentId = (req.agent && req.agent._id) || (req.staff && req.staff._id);
+      const assignments = await Assignment.find({ $or: [{ agentId }, { staffId: agentId }], recoveryStatus: { $ne: 'IN_PROGRESS' } })
       .populate('customerId')
       .populate('loanId');
 

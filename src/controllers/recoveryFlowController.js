@@ -16,10 +16,15 @@ const parseJson = (v, fallback) => {
   try { return v ? JSON.parse(v) : fallback; } catch (e) { return fallback; }
 };
 
-const saveImage = ({ file, sessionId, staffId, kind, location }) => {
+const saveImage = ({ file, sessionId, staffId, agentId, kind, location }) => {
+  const actualAgentId = agentId || staffId;
   const evidenceId = `EVID-${Date.now()}-${uuidv4().substring(0, 6)}`;
   return Evidence.create({
-    evidenceId, sessionId, staffId, kind,
+    evidenceId,
+    sessionId,
+    agentId: actualAgentId,
+    staffId: actualAgentId,
+    kind,
     fileName: `${kind.toLowerCase()}-${evidenceId}.jpg`,
     originalName: file.originalname || 'photo.jpg',
     filePath: `/api/v1/recovery/evidence/${evidenceId}/image`,
@@ -36,9 +41,22 @@ const errorMessage = (error, fallback) =>
   error && error.name === 'ValidationError' ? error.message : fallback;
 
 // Atomically increment agent statistics after a successful recovery
-// Uses $inc for concurrency safety, and session.deviceSessionId to prevent double-count
+// Uses atomic check-and-set on session.statsIncremented to prevent duplicate counts
 async function incrementAgentStats(agentId, distanceMeters, session) {
   try {
+    const sessionDoc = await RecoverySession.findOne({ _id: session._id });
+    if (sessionDoc && sessionDoc.statsIncremented) {
+      return; // Already incremented!
+    }
+
+    const updateRes = await RecoverySession.updateOne(
+      { _id: session._id, statsIncremented: { $ne: true } },
+      { $set: { statsIncremented: true } }
+    );
+    if (updateRes.modifiedCount === 0) {
+      return; // Concurrent race prevented
+    }
+
     const distanceKm = Number(distanceMeters) / 1000 || 0;
     const sessionIdForHistory = session.sessionId || session._id.toString();
 
@@ -63,12 +81,11 @@ async function incrementAgentStats(agentId, distanceMeters, session) {
       }
     );
   } catch (err) {
-    // Stats update failure must not fail the recovery submission
     console.error('[incrementAgentStats] Failed to update agent stats:', err.message);
   }
 }
 
-// POST /recovery/start-with-photo  (multipart: startPhoto + fields, or JSON for WALK/CYCLE)
+// POST /recovery/start-with-photo (multipart: startPhoto + fields, or JSON for WALK/OTHER)
 exports.startWithPhoto = async (req, res) => {
   let evidence = null;
   let session = null;
@@ -78,9 +95,9 @@ exports.startWithPhoto = async (req, res) => {
     const agentId = (req.agent && req.agent._id) || (req.staff && req.staff._id);
     const staffId = agentId.toString();
 
-    // Transport mode
-    const vehicleTypeRaw = String(req.body.vehicleType || '').toUpperCase().trim();
-    const isWalkLike = vehicleTypeRaw === 'WALK' || vehicleTypeRaw === 'CYCLE';
+    // Transport mode: WALK, BIKE, CAR, OTHER
+    const vehicleTypeRaw = String(req.body.vehicleType || req.body.transportMode || '').toUpperCase().trim();
+    const isWalkLike = vehicleTypeRaw === 'WALK' || vehicleTypeRaw === 'OTHER';
     const needsPhoto = vehicleTypeRaw === 'BIKE' || vehicleTypeRaw === 'CAR';
 
     // Vehicle validation for Bike/Car
@@ -91,10 +108,20 @@ exports.startWithPhoto = async (req, res) => {
       vehicleNumber = (vehicle && vehicle.vehicleNumber) || String(req.body.vehicleNumber || '').trim().toUpperCase();
       if (!req.file) return fail(res, 400, 'Starting speedometer photo is required for Bike/Car.');
     } else if (!isWalkLike) {
-      return fail(res, 400, 'Invalid transport mode. Must be WALK, CYCLE, BIKE, or CAR.');
+      return fail(res, 400, 'Invalid transport mode. Must be WALK, BIKE, CAR, or OTHER.');
     }
 
-    // Check for existing active session
+    const deviceSessionId = String(req.body.deviceSessionId || '').trim();
+
+    // Idempotency check: return existing if deviceSessionId was already started
+    if (deviceSessionId) {
+      const existing = await RecoverySession.findOne({ deviceSessionId });
+      if (existing) {
+        return res.status(200).json({ success: true, message: 'Session already started.', session: existing });
+      }
+    }
+
+    // Check for existing active session for this agent
     const active = await RecoverySession.findOne({
       $or: [{ agentId }, { staffId }],
       status: 'ACTIVE'
@@ -108,15 +135,6 @@ exports.startWithPhoto = async (req, res) => {
     }
 
     const initialLocation = parseJson(req.body.initialLocation, null);
-    const deviceSessionId = String(req.body.deviceSessionId || '').trim();
-
-    // Idempotency check
-    if (deviceSessionId) {
-      const existing = await RecoverySession.findOne({ deviceSessionId });
-      if (existing) {
-        return res.status(200).json({ success: true, message: 'Session already started.', session: existing });
-      }
-    }
 
     // Look up assignments for this agent to link; allow starting without specific cases selected
     const idsRaw = parseJson(req.body.assignmentIds, []);
@@ -135,7 +153,7 @@ exports.startWithPhoto = async (req, res) => {
         customerId = first.customerId;
         loanId = first.loanId;
         cases = found.map((a) => ({ assignmentId: a._id, customerId: a.customerId, loanId: a.loanId }));
-        await Assignment.updateMany({ _id: { $in: ids } }, { recoveryStatus: 'IN_PROGRESS', lastVisitDate: new Date() });
+        await Assignment.updateMany({ _id: { $in: ids }, $or: [{ agentId }, { staffId }] }, { recoveryStatus: 'IN_PROGRESS', lastVisitDate: new Date() });
       }
     }
 
@@ -150,8 +168,6 @@ exports.startWithPhoto = async (req, res) => {
       }
     }
 
-    // If absolutely no assignment exists, create session with agent's own _id as placeholder
-    // (allows demo/test use without seeded data)
     if (!assignmentId) {
       assignmentId = agentId;
       customerId = agentId;
@@ -163,7 +179,7 @@ exports.startWithPhoto = async (req, res) => {
 
     if (req.file) {
       evidence = await saveImage({
-        file: req.file, sessionId, staffId, kind: 'START_SPEEDOMETER', location: initialLocation
+        file: req.file, sessionId, staffId, agentId, kind: 'START_SPEEDOMETER', location: initialLocation
       });
     }
 
@@ -189,6 +205,7 @@ exports.startWithPhoto = async (req, res) => {
     if (initialLocation && initialLocation.latitude) {
       await TrackingPoint.create({
         sessionId, agentId, staffId,
+        pointId: `${sessionId}_init_${Date.now()}`,
         latitude: initialLocation.latitude,
         longitude: initialLocation.longitude,
         accuracy: initialLocation.accuracy || 0,
@@ -205,7 +222,7 @@ exports.startWithPhoto = async (req, res) => {
   }
 };
 
-// POST /recovery/sessions/:sessionId/finish  (multipart: endPhoto + remarks)
+// POST /recovery/sessions/:sessionId/finish (multipart: endPhoto + remarks)
 exports.finishSession = async (req, res) => {
   try {
     if (!getIsConnected()) return fail(res, 503, 'Database is not connected. Try again shortly.');
@@ -220,13 +237,13 @@ exports.finishSession = async (req, res) => {
       sessionId,
       $or: [{ agentId }, { staffId }]
     });
-    if (!session) return fail(res, 404, 'Recovery session not found.');
+    if (!session) return fail(res, 404, 'Recovery session not found or access denied.');
     if (session.status !== 'ACTIVE') {
       // Idempotent — already finished
-      return res.status(409).json({ success: true, message: 'This recovery is already finished.', session });
+      return res.status(200).json({ success: true, message: 'This recovery is already finished.', session });
     }
 
-    // Only BIKE and CAR require end photo; WALK and CYCLE do not
+    // Only BIKE and CAR require end photo; WALK and OTHER do not
     const vehicleType = String(session.vehicleType || '').toUpperCase();
     const needsEndPhoto = vehicleType === 'BIKE' || vehicleType === 'CAR';
     if (needsEndPhoto && !req.file) return fail(res, 400, 'Ending speedometer photo is required.');
@@ -235,7 +252,7 @@ exports.finishSession = async (req, res) => {
 
     let evidence = null;
     if (req.file) {
-      evidence = await saveImage({ file: req.file, sessionId, staffId, kind: 'END_SPEEDOMETER', location: endLocation });
+      evidence = await saveImage({ file: req.file, sessionId, staffId, agentId, kind: 'END_SPEEDOMETER', location: endLocation });
     }
 
     const { nlpSummary, nlpCategory } = summarize(remarks);
@@ -254,22 +271,37 @@ exports.finishSession = async (req, res) => {
     if (req.body.distanceMeters !== undefined && req.body.distanceMeters !== '') {
       session.distanceMeters = Number(req.body.distanceMeters) || 0;
     }
+    if (req.body.movingSeconds !== undefined && req.body.movingSeconds !== null && req.body.movingSeconds !== '') {
+      session.movingSeconds = Number(req.body.movingSeconds);
+    }
+    if (req.body.idleSeconds !== undefined && req.body.idleSeconds !== null && req.body.idleSeconds !== '') {
+      session.idleSeconds = Number(req.body.idleSeconds);
+    }
+    if (req.body.unknownSeconds !== undefined && req.body.unknownSeconds !== null && req.body.unknownSeconds !== '') {
+      session.unknownSeconds = Number(req.body.unknownSeconds);
+    }
+    if (req.body.startAddress !== undefined && req.body.startAddress !== null) {
+      session.startAddress = String(req.body.startAddress).trim().slice(0, 300);
+    }
+    if (req.body.endAddress !== undefined && req.body.endAddress !== null) {
+      session.endAddress = String(req.body.endAddress).trim().slice(0, 300);
+    }
     const finalLocation = rules.pickLocation(endLocation);
     if (finalLocation) session.endLocation = finalLocation;
     await session.save();
 
-    // Update assignments
+    // Update assignments verifying agent ownership
     const caseIds = (session.cases && session.cases.length
       ? session.cases.map((c) => c.assignmentId)
       : [session.assignmentId]).filter(Boolean);
     if (caseIds.length) {
       await Assignment.updateMany(
-        { _id: { $in: caseIds } },
+        { _id: { $in: caseIds }, $or: [{ agentId }, { staffId }] },
         { recoveryStatus: 'FOLLOW_UP_REQUIRED', notes: remarks, lastVisitDate: endTime }
       ).catch(() => {});
     }
 
-    // Atomically increment agent stats
+    // Atomically increment agent stats (duplicate-safe)
     await incrementAgentStats(agentId, session.distanceMeters, session);
 
     return res.status(200).json({ success: true, message: 'Recovery submitted.', session });
@@ -279,7 +311,7 @@ exports.finishSession = async (req, res) => {
   }
 };
 
-// POST /recovery/sessions/:sessionId/finish-walk  (JSON body, no photo — Walk & Cycle modes)
+// POST /recovery/sessions/:sessionId/finish-walk (JSON body, no photo — Walk & Other modes)
 exports.finishSessionWalk = async (req, res) => {
   try {
     if (!getIsConnected()) return fail(res, 503, 'Database not connected.');
@@ -287,19 +319,25 @@ exports.finishSessionWalk = async (req, res) => {
     const agentId = (req.agent && req.agent._id) || (req.staff && req.staff._id);
     const staffId = agentId.toString();
 
-    const remarks = String(req.body.remarks || '').trim();
-    if (!remarks) return fail(res, 400, 'Remarks are required.');
-
     const session = await RecoverySession.findOne({
       sessionId,
       $or: [{ agentId }, { staffId }]
     });
-    if (!session) return fail(res, 404, 'Recovery session not found.');
+    if (!session) return fail(res, 404, 'Recovery session not found or access denied.');
     if (session.status !== 'ACTIVE') {
-      return res.status(409).json({ success: true, message: 'This recovery is already finished.', session });
+      return res.status(200).json({ success: true, message: 'This recovery is already finished.', session });
     }
 
-    const endLocation = req.body.endLocation || null;
+    // Strict validation: BIKE and CAR must not bypass photo via finish-walk
+    const vehicleType = String(session.vehicleType || '').toUpperCase();
+    if (vehicleType === 'BIKE' || vehicleType === 'CAR') {
+      return fail(res, 400, 'Ending speedometer photo is required for Bike/Car recovery. Use the finish endpoint with photo.');
+    }
+
+    const remarks = String(req.body.remarks || '').trim();
+    if (!remarks) return fail(res, 400, 'Remarks are required.');
+
+    const endLocation = parseJson(req.body.endLocation, null);
     const { nlpSummary, nlpCategory } = summarize(remarks);
 
     const endTime = new Date();
@@ -315,6 +353,21 @@ exports.finishSessionWalk = async (req, res) => {
     if (req.body.distanceMeters !== undefined) {
       session.distanceMeters = Number(req.body.distanceMeters) || 0;
     }
+    if (req.body.movingSeconds !== undefined && req.body.movingSeconds !== null && req.body.movingSeconds !== '') {
+      session.movingSeconds = Number(req.body.movingSeconds);
+    }
+    if (req.body.idleSeconds !== undefined && req.body.idleSeconds !== null && req.body.idleSeconds !== '') {
+      session.idleSeconds = Number(req.body.idleSeconds);
+    }
+    if (req.body.unknownSeconds !== undefined && req.body.unknownSeconds !== null && req.body.unknownSeconds !== '') {
+      session.unknownSeconds = Number(req.body.unknownSeconds);
+    }
+    if (req.body.startAddress !== undefined && req.body.startAddress !== null) {
+      session.startAddress = String(req.body.startAddress).trim().slice(0, 300);
+    }
+    if (req.body.endAddress !== undefined && req.body.endAddress !== null) {
+      session.endAddress = String(req.body.endAddress).trim().slice(0, 300);
+    }
     const finalLocation = rules.pickLocation(endLocation);
     if (finalLocation) session.endLocation = finalLocation;
     await session.save();
@@ -324,7 +377,7 @@ exports.finishSessionWalk = async (req, res) => {
       : [session.assignmentId]).filter(Boolean);
     if (caseIds.length) {
       await Assignment.updateMany(
-        { _id: { $in: caseIds } },
+        { _id: { $in: caseIds }, $or: [{ agentId }, { staffId }] },
         { recoveryStatus: 'FOLLOW_UP_REQUIRED', notes: remarks, lastVisitDate: endTime }
       ).catch(() => {});
     }
@@ -352,7 +405,7 @@ exports.getHistory = async (req, res) => {
     })
       .sort({ endTime: -1 })
       .limit(200)
-      .select('-rawRemarks -remarks -visitNotes')  // Do NOT expose raw remarks to frontend
+      .select('-rawRemarks -remarks -visitNotes') // Do NOT expose raw remarks to frontend
       .lean();
 
     return res.status(200).json({ success: true, sessions });
@@ -362,7 +415,7 @@ exports.getHistory = async (req, res) => {
   }
 };
 
-// POST /recovery/sync — accepts a completed offline session and saves it (idempotent via deviceSessionId)
+// POST /recovery/sync — accepts a completed offline session and saves/reconciles it
 exports.syncOfflineSession = async (req, res) => {
   try {
     if (!getIsConnected()) return fail(res, 503, 'Database not connected.');
@@ -373,15 +426,159 @@ exports.syncOfflineSession = async (req, res) => {
     const deviceSessionId = String(body.deviceSessionId || '').trim();
     if (!deviceSessionId) return fail(res, 400, 'deviceSessionId is required for sync.');
 
-    // Idempotency: if already synced, return existing record
+    // Look for files uploaded via multipart fields
+    const startPhotoFile = (req.files && req.files.startPhoto && req.files.startPhoto[0]) ||
+      (req.file && req.file.fieldname === 'startPhoto' ? req.file : null);
+    const endPhotoFile = (req.files && req.files.endPhoto && req.files.endPhoto[0]) ||
+      (req.file && req.file.fieldname === 'endPhoto' ? req.file : null);
+
+    // ── CASE 1: Session already exists in DB ──────────────────────────────────
     const existing = await RecoverySession.findOne({ deviceSessionId });
     if (existing) {
-      return res.status(200).json({ success: true, alreadySynced: true, session: existing });
+      if (existing.status === 'COMPLETED') {
+        // Idempotency: already synced and completed
+        return res.status(200).json({ success: true, alreadySynced: true, session: existing });
+      }
+
+      // Session exists but was ACTIVE (started online, finished offline)
+      const vehicleType = String(existing.vehicleType || '').toUpperCase();
+      const needsPhoto = vehicleType === 'BIKE' || vehicleType === 'CAR';
+
+      if (needsPhoto && !endPhotoFile && !existing.endSpeedometerEvidenceId) {
+        return fail(res, 400, 'Ending speedometer photo is required to finish BIKE/CAR recovery.');
+      }
+
+      const endLoc = parseJson(body.endLocation, null);
+      if (endPhotoFile) {
+        const endEv = await saveImage({
+          file: endPhotoFile,
+          sessionId: existing.sessionId,
+          staffId,
+          agentId,
+          kind: 'END_SPEEDOMETER',
+          location: endLoc
+        });
+        existing.endSpeedometerEvidenceId = endEv.evidenceId;
+      }
+
+      const remarks = String(body.remarks || body.rawRemarks || existing.remarks || '').trim();
+      if (!remarks) return fail(res, 400, 'Customer visit remarks are required.');
+
+      const { nlpSummary, nlpCategory } = summarize(remarks);
+      existing.endTime = body.endTime ? new Date(body.endTime) : new Date();
+      existing.status = 'COMPLETED';
+      existing.remarks = remarks;
+      existing.rawRemarks = remarks;
+      existing.visitNotes = remarks;
+      existing.nlpSummary = nlpSummary;
+      existing.nlpCategory = nlpCategory;
+      if (body.durationSeconds !== undefined) existing.durationSeconds = Number(body.durationSeconds) || 0;
+      if (body.distanceMeters !== undefined) existing.distanceMeters = Number(body.distanceMeters) || 0;
+      if (body.movingSeconds !== undefined && body.movingSeconds !== null && body.movingSeconds !== '') {
+        existing.movingSeconds = Number(body.movingSeconds);
+      }
+      if (body.idleSeconds !== undefined && body.idleSeconds !== null && body.idleSeconds !== '') {
+        existing.idleSeconds = Number(body.idleSeconds);
+      }
+      if (body.unknownSeconds !== undefined && body.unknownSeconds !== null && body.unknownSeconds !== '') {
+        existing.unknownSeconds = Number(body.unknownSeconds);
+      }
+      if (body.startAddress !== undefined && body.startAddress !== null) {
+        existing.startAddress = String(body.startAddress).trim().slice(0, 300);
+      }
+      if (body.endAddress !== undefined && body.endAddress !== null) {
+        existing.endAddress = String(body.endAddress).trim().slice(0, 300);
+      }
+      const finalLoc = rules.pickLocation(endLoc);
+      if (finalLoc) existing.endLocation = finalLoc;
+
+      await existing.save();
+
+      // Persist any tracking points passed in sync payload
+      const rawPoints = parseJson(body.points, []);
+      if (Array.isArray(rawPoints) && rawPoints.length > 0) {
+        const ptDocs = rawPoints.map(p => ({
+          sessionId: existing.sessionId,
+          agentId,
+          staffId,
+          pointId: p.pointId || `${existing.sessionId}_${new Date(p.timestamp || Date.now()).getTime()}_${Number(p.latitude).toFixed(6)}_${Number(p.longitude).toFixed(6)}`,
+          latitude: Number(p.latitude),
+          longitude: Number(p.longitude),
+          accuracy: Number(p.accuracy) || 0,
+          altitude: Number(p.altitude) || 0,
+          speed: Number(p.speed) || 0,
+          timestamp: p.timestamp ? new Date(p.timestamp) : new Date()
+        }));
+        try {
+          await TrackingPoint.insertMany(ptDocs, { ordered: false });
+        } catch (pe) {
+          if (pe.code !== 11000 && !pe.writeErrors?.every(e => e.code === 11000)) throw pe;
+        }
+      }
+
+      await incrementAgentStats(agentId, existing.distanceMeters, existing);
+      return res.status(200).json({ success: true, session: existing });
     }
 
-    const { nlpSummary, nlpCategory } = summarize(body.remarks || body.rawRemarks || '');
+    // ── CASE 2: Entirely offline session creation ───────────────────────────
+    const vehicleTypeRaw = String(body.vehicleType || body.transportMode || 'WALK').toUpperCase().trim();
+    const isWalkLike = vehicleTypeRaw === 'WALK' || vehicleTypeRaw === 'OTHER';
+    const needsPhotos = vehicleTypeRaw === 'BIKE' || vehicleTypeRaw === 'CAR';
 
-    const sessionId = `SESS-SYNC-${Date.now()}-${uuidv4().substring(0, 8)}`;
+    if (!isWalkLike && !needsPhotos) {
+      return fail(res, 400, 'Invalid transport mode. Must be WALK, BIKE, CAR, or OTHER.');
+    }
+
+    let vehicleNumber = '';
+    if (needsPhotos) {
+      const vCheck = rules.validateVehicle(vehicleTypeRaw, body.vehicleNumber);
+      if (vCheck.error) return fail(res, 400, vCheck.error);
+      vehicleNumber = vCheck.vehicleNumber;
+
+      if (!startPhotoFile) {
+        return fail(res, 400, 'Starting speedometer photo is mandatory for BIKE and CAR offline synchronization.');
+      }
+      if (!endPhotoFile) {
+        return fail(res, 400, 'Ending speedometer photo is mandatory for BIKE and CAR offline synchronization.');
+      }
+    }
+
+    const remarks = String(body.remarks || body.rawRemarks || '').trim();
+    if (!remarks) return fail(res, 400, 'Customer visit remarks are required.');
+
+    const sessionId = (body.sessionId && String(body.sessionId).startsWith('SESS-'))
+      ? String(body.sessionId)
+      : `SESS-SYNC-${Date.now()}-${uuidv4().substring(0, 8)}`;
+
+    const startLoc = parseJson(body.startLocation, null);
+    const endLoc = parseJson(body.endLocation, null);
+
+    let startEvidence = null;
+    let endEvidence = null;
+
+    if (startPhotoFile) {
+      startEvidence = await saveImage({
+        file: startPhotoFile,
+        sessionId,
+        staffId,
+        agentId,
+        kind: 'START_SPEEDOMETER',
+        location: startLoc
+      });
+    }
+
+    if (endPhotoFile) {
+      endEvidence = await saveImage({
+        file: endPhotoFile,
+        sessionId,
+        staffId,
+        agentId,
+        kind: 'END_SPEEDOMETER',
+        location: endLoc
+      });
+    }
+
+    const { nlpSummary, nlpCategory } = summarize(remarks);
 
     let assignmentId = body.assignmentId;
     let customerId = body.customerId;
@@ -394,7 +591,6 @@ exports.syncOfflineSession = async (req, res) => {
         customerId = fallback.customerId;
         loanId = fallback.loanId;
       } else {
-        // No assignments at all — use agent's own ID as placeholder
         assignmentId = agentId;
         customerId = agentId;
         loanId = agentId;
@@ -413,27 +609,64 @@ exports.syncOfflineSession = async (req, res) => {
       endTime: body.endTime ? new Date(body.endTime) : new Date(),
       status: 'COMPLETED',
       outcome: body.outcome || 'FOLLOW_UP_REQUIRED',
-      vehicleType: String(body.vehicleType || '').toUpperCase(),
-      vehicleNumber: body.vehicleNumber || '',
+      vehicleType: vehicleTypeRaw,
+      vehicleNumber,
       durationSeconds: Number(body.durationSeconds) || 0,
       distanceMeters: Number(body.distanceMeters) || 0,
-      remarks: body.remarks || body.rawRemarks || '',
-      rawRemarks: body.rawRemarks || body.remarks || '',
-      visitNotes: body.remarks || body.rawRemarks || '',
+      movingSeconds: (body.movingSeconds !== undefined && body.movingSeconds !== null && body.movingSeconds !== '') ? Number(body.movingSeconds) : null,
+      idleSeconds: (body.idleSeconds !== undefined && body.idleSeconds !== null && body.idleSeconds !== '') ? Number(body.idleSeconds) : null,
+      unknownSeconds: (body.unknownSeconds !== undefined && body.unknownSeconds !== null && body.unknownSeconds !== '') ? Number(body.unknownSeconds) : null,
+      startAddress: body.startAddress ? String(body.startAddress).trim().slice(0, 300) : '',
+      endAddress: body.endAddress ? String(body.endAddress).trim().slice(0, 300) : '',
+      remarks,
+      rawRemarks: remarks,
+      visitNotes: remarks,
       nlpSummary,
       nlpCategory,
-      startLocation: body.startLocation || null,
-      endLocation: body.endLocation || null,
+      startSpeedometerEvidenceId: startEvidence ? startEvidence.evidenceId : '',
+      endSpeedometerEvidenceId: endEvidence ? endEvidence.evidenceId : '',
+      startLocation: rules.pickLocation(startLoc),
+      endLocation: rules.pickLocation(endLoc),
       area: body.area || '',
     });
 
-    // Increment agent stats for synced session
+    // Persist GPS tracking points
+    const rawPoints = parseJson(body.points, []);
+    if (Array.isArray(rawPoints) && rawPoints.length > 0) {
+      const ptDocs = rawPoints.map(p => ({
+        sessionId,
+        agentId,
+        staffId,
+        pointId: p.pointId || `${sessionId}_${new Date(p.timestamp || Date.now()).getTime()}_${Number(p.latitude).toFixed(6)}_${Number(p.longitude).toFixed(6)}`,
+        latitude: Number(p.latitude),
+        longitude: Number(p.longitude),
+        accuracy: Number(p.accuracy) || 0,
+        altitude: Number(p.altitude) || 0,
+        speed: Number(p.speed) || 0,
+        timestamp: p.timestamp ? new Date(p.timestamp) : new Date()
+      }));
+      try {
+        await TrackingPoint.insertMany(ptDocs, { ordered: false });
+      } catch (pe) {
+        if (pe.code !== 11000 && !pe.writeErrors?.every(e => e.code === 11000)) throw pe;
+      }
+    }
+
+    // Verify assignment ownership on update
+    if (assignmentId && assignmentId !== agentId) {
+      await Assignment.updateOne(
+        { _id: assignmentId, $or: [{ agentId }, { staffId }] },
+        { recoveryStatus: 'FOLLOW_UP_REQUIRED', notes: remarks, lastVisitDate: session.endTime }
+      ).catch(() => {});
+    }
+
+    // Atomically increment agent stats
     await incrementAgentStats(agentId, session.distanceMeters, session);
 
     return res.status(201).json({ success: true, session });
   } catch (error) {
     console.error('syncOfflineSession error:', error.message);
-    return fail(res, 500, 'Could not sync offline session.');
+    return fail(res, 500, errorMessage(error, 'Could not sync offline session.'));
   }
 };
 

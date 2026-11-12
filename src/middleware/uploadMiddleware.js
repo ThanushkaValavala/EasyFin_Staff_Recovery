@@ -20,4 +20,12 @@ upload.safeSingle = (field) => (req, res, next) =>
     return res.status(400).json({ success: false, message });
   });
 
+// Multi-field safe upload (e.g. startPhoto + endPhoto for sync)
+upload.safeFields = (fields) => (req, res, next) =>
+  upload.fields(fields)(req, res, (err) => {
+    if (!err) return next();
+    const message = err.code === 'LIMIT_FILE_SIZE' ? 'Photo is too large (max 10 MB).' : err.message;
+    return res.status(400).json({ success: false, message });
+  });
+
 module.exports = upload;

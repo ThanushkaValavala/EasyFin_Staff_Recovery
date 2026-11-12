@@ -3,15 +3,15 @@ const Evidence = require('../models/Evidence');
 const memoryStore = require('./store');
 const { getIsConnected } = require('../config/db');
 
-const VEHICLE_TYPES = ['WALK', 'CYCLE', 'BIKE', 'SCOOTER', 'CAR', 'AUTO', 'OTHER'];
+const VEHICLE_TYPES = ['WALK', 'BIKE', 'CAR', 'OTHER'];
 
 // Checks the vehicle type and number entered when a recovery starts.
 const validateVehicle = (vehicleType, vehicleNumber) => {
   const type = String(vehicleType || '').trim().toUpperCase();
   const number = String(vehicleNumber || '').replace(/[\s-]/g, '').toUpperCase();
 
-  // Walk and Cycle modes: no vehicle number required
-  if (type === 'WALK' || type === 'CYCLE') {
+  // Walk and Other modes: no vehicle number required
+  if (type === 'WALK' || type === 'OTHER') {
     return { vehicleType: type, vehicleNumber: '' };
   }
 
@@ -34,12 +34,13 @@ const pickLocation = (loc) => {
 
   const latitude = Number(loc.latitude);
   const longitude = Number(loc.longitude);
+  const accuracy = Number(loc.accuracy) || 0;
 
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
     return undefined;
   }
 
-  return { latitude, longitude };
+  return { latitude, longitude, accuracy };
 };
 
 // Rules before a recovery can be completed:

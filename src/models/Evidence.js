@@ -4,7 +4,8 @@ const evidenceSchema = new mongoose.Schema(
   {
     evidenceId: { type: String, required: true, unique: true, index: true },
     sessionId: { type: String, required: true, index: true },
-    staffId: { type: mongoose.Schema.Types.ObjectId, ref: 'Staff', required: true },
+    agentId: { type: mongoose.Schema.Types.Mixed, ref: 'Staff', index: true },
+    staffId: { type: mongoose.Schema.Types.Mixed, ref: 'Staff', required: true, index: true },
     kind: { type: String, enum: ['EVIDENCE', 'START_SPEEDOMETER', 'END_SPEEDOMETER'], default: 'EVIDENCE', index: true },
     fileName: { type: String, required: true },
     originalName: { type: String, default: 'photo.jpg' },
@@ -19,5 +20,14 @@ const evidenceSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+evidenceSchema.pre('save', function (next) {
+  if (this.agentId && !this.staffId) {
+    this.staffId = this.agentId;
+  } else if (this.staffId && !this.agentId) {
+    this.agentId = this.staffId;
+  }
+  next();
+});
 
 module.exports = mongoose.model('Evidence', evidenceSchema);

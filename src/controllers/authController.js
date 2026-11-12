@@ -6,6 +6,23 @@ const memoryStore = require('../services/store');
 const { getIsConnected } = require('../config/db');
 const { generateStrongPassword } = require('../services/passwordGenerator');
 const { normalizePhoneNumber } = require('../utils/phoneNormalizer');
+const BranchMember = require('../models/BranchMember');
+
+async function isNumberInBranch(branch, phone) {
+  if (!getIsConnected() || !branch || !phone) {
+    return false;
+  }
+
+  const normalizedPhone = BranchMember.normalize(phone);
+  if (!normalizedPhone || normalizedPhone.length !== 10) {
+    return false;
+  }
+
+  const member = await BranchMember.findOne({ phone: normalizedPhone, branch, isActive: true });
+  return !!member;
+}
+
+exports.isNumberInBranch = isNumberInBranch;
 
 const generateToken = (staff) => {
   const secret = process.env.JWT_SECRET;
@@ -244,10 +261,31 @@ const MAX_VERIFY_ATTEMPTS = 5;
 
 exports.generateOtp = async (req, res) => {
   try {
+    const rawBranch = req.body.branch;
+    const branch = rawBranch ? String(rawBranch).trim() : '';
+    if (!branch) {
+      return res.status(400).json({ success: false, message: 'Please select a branch.' });
+    }
+
     const rawPhone = String(req.body.phone || '').trim();
     const phone = normalizePhoneNumber(rawPhone);
     if (!phone || phone.length < 8) {
       return res.status(400).json({ success: false, message: 'Valid phone number is required.' });
+    }
+
+    if (!getIsConnected()) {
+      return res.status(503).json({
+        success: false,
+        message: 'Verification service unavailable. Try again.'
+      });
+    }
+
+    const isAllowed = await isNumberInBranch(branch, rawPhone);
+    if (!isAllowed) {
+      return res.status(403).json({
+        success: false,
+        message: 'This number is not registered under the selected branch.'
+      });
     }
 
     const now = Date.now();
@@ -310,12 +348,33 @@ exports.generateOtp = async (req, res) => {
 
 exports.verifyOtp = async (req, res) => {
   try {
+    const rawBranch = req.body.branch;
+    const branch = rawBranch ? String(rawBranch).trim() : '';
+    if (!branch) {
+      return res.status(400).json({ success: false, message: 'Please select a branch.' });
+    }
+
     const rawPhone = String(req.body.phone || '').trim();
     const phone = normalizePhoneNumber(rawPhone);
     const otp = String(req.body.otp || '').trim();
 
     if (!phone || !otp) {
       return res.status(400).json({ success: false, message: 'Phone and OTP are required.' });
+    }
+
+    if (!getIsConnected()) {
+      return res.status(503).json({
+        success: false,
+        message: 'Verification service unavailable. Try again.'
+      });
+    }
+
+    const isAllowed = await isNumberInBranch(branch, rawPhone);
+    if (!isAllowed) {
+      return res.status(403).json({
+        success: false,
+        message: 'This number is not registered under the selected branch.'
+      });
     }
 
     let otpValid = false;
@@ -399,7 +458,7 @@ exports.verifyOtp = async (req, res) => {
             username: `agent_${phone.replace(/\D/g, '').slice(-10)}`,
             phone,
             email: `demo_${phone.replace(/\D/g, '')}@easyfin.demo`,
-            assignedArea: 'Demo Area',
+            assignedArea: branch,
             role: 'field_officer',
             password: 'Demo@1234Secure',
             isActive: true,
@@ -421,7 +480,7 @@ exports.verifyOtp = async (req, res) => {
           phone,
           email: `demo_${phone}@easyfin.demo`,
           role: 'field_officer',
-          assignedArea: 'Demo Area',
+          assignedArea: branch,
           isActive: true,
         };
         memoryStore.staffList.push(demoStaff);
