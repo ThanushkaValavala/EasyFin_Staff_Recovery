@@ -39,6 +39,28 @@ async function describe(p) {
   return coords;
 }
 
+async function getReadableAddress(p) {
+  if (!p || typeof p.latitude !== 'number' || typeof p.longitude !== 'number') return '';
+  try {
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('timeout')), 5000)
+    );
+    const geocodePromise = Location.reverseGeocodeAsync({
+      latitude: p.latitude,
+      longitude: p.longitude,
+    });
+    const r = await Promise.race([geocodePromise, timeoutPromise]);
+    if (r && r[0]) {
+      const a = r[0];
+      const cityOrSub = a.subregion || a.city || '';
+      const parts = [a.name, a.street, cityOrSub].filter(Boolean);
+      const uniqueParts = parts.filter((part, idx) => parts.indexOf(part) === idx);
+      return uniqueParts.join(', ') || '';
+    }
+  } catch (e) {}
+  return '';
+}
+
 const REMARK_SUGGESTIONS = [
   'Customer was not available during the visit.',
   'I met the customer. Payment will be made next week.',
@@ -52,6 +74,9 @@ export default function CompleteScreen({ route, navigation }) {
     session,
     distanceMeters: dist,
     durationSeconds,
+    movingSeconds,
+    idleSeconds,
+    unknownSeconds,
     startLocation,
     endLocation,
     transportMode,
@@ -72,11 +97,19 @@ export default function CompleteScreen({ route, navigation }) {
   const [startText, setStartText] = useState('Locating...');
   const [endText, setEndText] = useState('Locating...');
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const startAddressRef = useRef('');
+  const endAddressRef = useRef('');
   const done = useRef(false);
 
   useEffect(() => {
     describe(startLocation).then(setStartText);
     describe(endLocation).then(setEndText);
+    getReadableAddress(startLocation).then((addr) => {
+      startAddressRef.current = addr || '';
+    });
+    getReadableAddress(endLocation).then((addr) => {
+      endAddressRef.current = addr || '';
+    });
   }, []);
 
   useEffect(
@@ -143,6 +176,23 @@ export default function CompleteScreen({ route, navigation }) {
     setSubmitting(true);
     const end = endLocation || {};
 
+    let sAddr = startAddressRef.current;
+    if (!sAddr && startLocation) {
+      try {
+        sAddr = await getReadableAddress(startLocation);
+        startAddressRef.current = sAddr || '';
+      } catch (e) {}
+    }
+    let eAddr = endAddressRef.current;
+    if (!eAddr && (endLocation || end)) {
+      try {
+        eAddr = await getReadableAddress(endLocation || end);
+        endAddressRef.current = eAddr || '';
+      } catch (e) {}
+    }
+    sAddr = sAddr || '';
+    eAddr = eAddr || '';
+
     try {
       if (!needsEndPhoto) {
         // WALK / OTHER: JSON finish endpoint
@@ -150,6 +200,11 @@ export default function CompleteScreen({ route, navigation }) {
           remarks: remarks.trim(),
           distanceMeters: Math.round(dist || 0),
           durationSeconds: Math.round(durationSeconds || 0),
+          movingSeconds: movingSeconds != null ? Math.round(movingSeconds) : null,
+          idleSeconds: idleSeconds != null ? Math.round(idleSeconds) : null,
+          unknownSeconds: unknownSeconds != null ? Math.round(unknownSeconds) : null,
+          startAddress: sAddr,
+          endAddress: eAddr,
           endLocation: {
             latitude: end.latitude || 0,
             longitude: end.longitude || 0,
@@ -164,6 +219,11 @@ export default function CompleteScreen({ route, navigation }) {
             remarks: remarks.trim(),
             distanceMeters: String(Math.round(dist || 0)),
             durationSeconds: String(Math.round(durationSeconds || 0)),
+            movingSeconds: movingSeconds != null ? String(Math.round(movingSeconds)) : '',
+            idleSeconds: idleSeconds != null ? String(Math.round(idleSeconds)) : '',
+            unknownSeconds: unknownSeconds != null ? String(Math.round(unknownSeconds)) : '',
+            startAddress: sAddr,
+            endAddress: eAddr,
             endLocation: JSON.stringify({
               latitude: end.latitude || 0,
               longitude: end.longitude || 0,
@@ -202,6 +262,11 @@ export default function CompleteScreen({ route, navigation }) {
             vehicleNumber: vehicleNumber || session?.vehicleNumber || '',
             durationSeconds: Math.round(durationSeconds || 0),
             distanceMeters: Math.round(dist || 0),
+            movingSeconds: movingSeconds != null ? Math.round(movingSeconds) : null,
+            idleSeconds: idleSeconds != null ? Math.round(idleSeconds) : null,
+            unknownSeconds: unknownSeconds != null ? Math.round(unknownSeconds) : null,
+            startAddress: sAddr,
+            endAddress: eAddr,
             remarks: remarks.trim(),
             rawRemarks: remarks.trim(),
             nlpSummary,

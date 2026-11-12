@@ -77,6 +77,10 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
   const pathRef = useRef([]);
   const metersRef = useRef(0);
   const movingSecondsRef = useRef(0);
+  const idleSecondsRef = useRef(0);
+  const unknownSecondsRef = useRef(0);
+  const lastGpsTimeMsRef = useRef(null);
+  const lastGpsCoordRef = useRef(null);
   const pendingRef = useRef([]);
   const pendingMetersRef = useRef(0);
   const recentPointsRef = useRef([]);
@@ -118,6 +122,35 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
       return;
     }
     lastTimestampRef.current = p.timestamp;
+
+    // Tracking counters (moving, idle, unknown)
+    const currTimeMs = p.timestamp ? new Date(p.timestamp).getTime() : Date.now();
+    if (lastGpsTimeMsRef.current != null) {
+      const rawDt = Math.max(0, (currTimeMs - lastGpsTimeMsRef.current) / 1000);
+      if (rawDt > 0) {
+        if (rawDt > 5) {
+          unknownSecondsRef.current += (rawDt - 5);
+        }
+        const dt = Math.min(rawDt, 5);
+
+        const isAccurate = p.accuracy != null && p.accuracy <= profile.maxAcc;
+        if (!isAccurate) {
+          unknownSecondsRef.current += dt;
+        } else {
+          const isSpeedKnown = p.speed != null;
+          const posChange = lastGpsCoordRef.current ? distanceMeters(lastGpsCoordRef.current, p) : 0;
+          const isIdle = (isSpeedKnown && p.speed < 0.5) || (!isSpeedKnown && posChange < p.accuracy);
+
+          if (isIdle) {
+            idleSecondsRef.current += dt;
+          } else {
+            movingSecondsRef.current += dt;
+          }
+        }
+      }
+    }
+    lastGpsTimeMsRef.current = currTimeMs;
+    lastGpsCoordRef.current = { latitude: p.latitude, longitude: p.longitude };
 
     if (p.accuracy != null) {
       setLatestAccuracy(p.accuracy);
@@ -214,12 +247,6 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
         pendingRef.current.push(candidate);
         pendingMetersRef.current += dist;
 
-        // Track movingSeconds (sum of dt while speed >= 0.5)
-        const effectiveSpeed = p.speed != null ? p.speed : calcSpeed;
-        if (effectiveSpeed >= 0.5) {
-          movingSecondsRef.current += dt;
-        }
-
         setPath([...pathRef.current]);
         setMeters(metersRef.current);
       }
@@ -245,7 +272,6 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
         if (dt > 0 && incDist > 0) {
           metersRef.current += incDist;
           pendingMetersRef.current += incDist;
-          movingSecondsRef.current += dt;
         }
 
         const candidate = {
@@ -268,9 +294,6 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
         if (dist > Math.max(10, p.accuracy) && rawDt > 0 && calcSpeed < profile.maxSpeed) {
           metersRef.current += dist;
           pendingMetersRef.current += dist;
-          if (calcSpeed >= 0.5) {
-            movingSecondsRef.current += dt;
-          }
 
           const candidate = {
             ...p,
@@ -442,6 +465,8 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
       distanceMeters: metersRef.current,
       durationSeconds: exactDurationSeconds,
       movingSeconds: Math.round(movingSecondsRef.current),
+      idleSeconds: Math.round(idleSecondsRef.current),
+      unknownSeconds: Math.round(unknownSecondsRef.current),
       startLocation: pathRef.current[0] || session?.startLocation || null,
       endLocation: end || pathRef.current[0] || null,
       transportMode: transportMode || session?.vehicleType || 'WALK',

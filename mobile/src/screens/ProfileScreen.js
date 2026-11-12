@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
   ActivityIndicator, RefreshControl, Alert,
@@ -6,9 +6,12 @@ import {
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
+import * as Location from 'expo-location';
 import { apiGet } from '../api';
 import { BADGE_COLORS } from '../utils/nlpSummarizer';
 import { cacheHistory, getCachedHistory, getPendingSessions, syncPendingSessions } from '../utils/offlineStore';
+
+const memoryAddressCache = new Map();
 
 const fmtDate = (d) => {
   if (!d) return '-';
@@ -34,6 +37,17 @@ const fmtDuration = (s) => {
   const m = Math.floor((sec % 3600) / 60);
   const pad = (n) => String(n).padStart(2, '0');
   return (h > 0 ? `${h}h ` : '') + `${pad(m)}m`;
+};
+
+const fmtIdleTime = (s) => {
+  if (s == null) return '-';
+  const sec = Math.max(0, Math.floor(s));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const remSec = sec % 60;
+  if (h > 0) return `${h}h ${m}m ${remSec}s`;
+  if (m > 0) return `${m}m ${remSec}s`;
+  return `${remSec}s`;
 };
 
 const fmtDistance = (m) => {
@@ -76,6 +90,69 @@ function SessionCard({ session }) {
   const startLoc = session.startLocation ? `${session.startLocation.latitude?.toFixed(4)}, ${session.startLocation.longitude?.toFixed(4)}` : null;
   const endLoc = session.endLocation ? `${session.endLocation.latitude?.toFixed(4)}, ${session.endLocation.longitude?.toFixed(4)}` : null;
 
+  const [lazyStartAddress, setLazyStartAddress] = useState(
+    () => session.startAddress || (session.startLocation ? memoryAddressCache.get(`${session.startLocation.latitude},${session.startLocation.longitude}`) : null)
+  );
+  const [lazyEndAddress, setLazyEndAddress] = useState(
+    () => session.endAddress || (session.endLocation ? memoryAddressCache.get(`${session.endLocation.latitude},${session.endLocation.longitude}`) : null)
+  );
+
+  useEffect(() => {
+    let active = true;
+    if (!session.startAddress && session.startLocation?.latitude != null && session.startLocation?.longitude != null) {
+      const key = `${session.startLocation.latitude},${session.startLocation.longitude}`;
+      if (memoryAddressCache.has(key)) {
+        setLazyStartAddress(memoryAddressCache.get(key));
+      } else {
+        Location.reverseGeocodeAsync({
+          latitude: session.startLocation.latitude,
+          longitude: session.startLocation.longitude,
+        }).then((r) => {
+          if (!active) return;
+          if (r && r[0]) {
+            const a = r[0];
+            const cityOrSub = a.subregion || a.city || '';
+            const parts = [a.name, a.street, cityOrSub].filter(Boolean);
+            const line = parts.filter((p, i) => parts.indexOf(p) === i).join(', ');
+            if (line) {
+              memoryAddressCache.set(key, line);
+              setLazyStartAddress(line);
+            }
+          }
+        }).catch(() => {});
+      }
+    }
+
+    if (!session.endAddress && session.endLocation?.latitude != null && session.endLocation?.longitude != null) {
+      const key = `${session.endLocation.latitude},${session.endLocation.longitude}`;
+      if (memoryAddressCache.has(key)) {
+        setLazyEndAddress(memoryAddressCache.get(key));
+      } else {
+        Location.reverseGeocodeAsync({
+          latitude: session.endLocation.latitude,
+          longitude: session.endLocation.longitude,
+        }).then((r) => {
+          if (!active) return;
+          if (r && r[0]) {
+            const a = r[0];
+            const cityOrSub = a.subregion || a.city || '';
+            const parts = [a.name, a.street, cityOrSub].filter(Boolean);
+            const line = parts.filter((p, i) => parts.indexOf(p) === i).join(', ');
+            if (line) {
+              memoryAddressCache.set(key, line);
+              setLazyEndAddress(line);
+            }
+          }
+        }).catch(() => {});
+      }
+    }
+
+    return () => { active = false; };
+  }, [session.startAddress, session.endAddress, session.startLocation, session.endLocation]);
+
+  const displayStart = session.startAddress || lazyStartAddress || startLoc;
+  const displayEnd = session.endAddress || lazyEndAddress || endLoc;
+
   return (
     <View style={[styles.sessionCard, isPending && styles.sessionCardPending]}>
       {isPending ? (
@@ -107,15 +184,16 @@ function SessionCard({ session }) {
         <InfoRow icon="time-outline" label="Start Time" value={fmtTime(session.startTime)} />
         <InfoRow icon="checkmark-circle-outline" label="End Time" value={fmtTime(session.endTime)} />
         <InfoRow icon="hourglass-outline" label="Duration" value={fmtDuration(session.durationSeconds)} />
+        <InfoRow icon="pause-circle-outline" label="Idle Time" value={fmtIdleTime(session.idleSeconds)} />
         <InfoRow icon="navigate-outline" label="Distance" value={fmtDistance(session.distanceMeters)} />
         {session.vehicleNumber ? (
           <InfoRow icon="car-outline" label="Vehicle Reg" value={session.vehicleNumber} />
         ) : null}
-        {startLoc ? (
-          <InfoRow icon="location-outline" label="Start Loc" value={startLoc} />
+        {displayStart ? (
+          <InfoRow icon="location-outline" label="Start Loc" value={displayStart} />
         ) : null}
-        {endLoc ? (
-          <InfoRow icon="flag-outline" label="End Loc" value={endLoc} />
+        {displayEnd ? (
+          <InfoRow icon="flag-outline" label="End Loc" value={displayEnd} />
         ) : null}
       </View>
     </View>

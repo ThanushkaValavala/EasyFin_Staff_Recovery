@@ -7,7 +7,30 @@
  * locally and uploaded during sync before the session is removed from the pending queue.
  */
 import * as SecureStore from 'expo-secure-store';
+import * as Location from 'expo-location';
 import { apiPost, apiUploadFile, apiUploadFiles } from '../api';
+
+async function getReadableAddress(p) {
+  if (!p || typeof p.latitude !== 'number' || typeof p.longitude !== 'number') return '';
+  try {
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('timeout')), 5000)
+    );
+    const geocodePromise = Location.reverseGeocodeAsync({
+      latitude: p.latitude,
+      longitude: p.longitude,
+    });
+    const r = await Promise.race([geocodePromise, timeoutPromise]);
+    if (r && r[0]) {
+      const a = r[0];
+      const cityOrSub = a.subregion || a.city || '';
+      const parts = [a.name, a.street, cityOrSub].filter(Boolean);
+      const uniqueParts = parts.filter((part, idx) => parts.indexOf(part) === idx);
+      return uniqueParts.join(', ') || '';
+    }
+  } catch (e) {}
+  return '';
+}
 
 const PENDING_KEY = 'pending_recovery_sessions';
 const HISTORY_CACHE_KEY = 'cached_recovery_history';
@@ -105,6 +128,21 @@ export async function syncPendingSessions() {
 
     for (const session of list) {
       try {
+        let startAddress = session.startAddress || '';
+        let endAddress = session.endAddress || '';
+        if (!startAddress && session.startLocation) {
+          try {
+            startAddress = await getReadableAddress(session.startLocation);
+          } catch (e) {}
+        }
+        if (!endAddress && session.endLocation) {
+          try {
+            endAddress = await getReadableAddress(session.endLocation);
+          } catch (e) {}
+        }
+        startAddress = startAddress || '';
+        endAddress = endAddress || '';
+
         const mode = String(session.transportMode || session.vehicleType || 'WALK').toUpperCase();
         const isWalkLike = mode === 'WALK' || mode === 'OTHER';
         const needsPhotos = mode === 'BIKE' || mode === 'CAR';
@@ -127,6 +165,11 @@ export async function syncPendingSessions() {
                 remarks: session.remarks || session.rawRemarks || '',
                 distanceMeters: String(Math.round(session.distanceMeters || 0)),
                 durationSeconds: String(Math.round(session.durationSeconds || 0)),
+                movingSeconds: session.movingSeconds != null ? String(Math.round(session.movingSeconds)) : '',
+                idleSeconds: session.idleSeconds != null ? String(Math.round(session.idleSeconds)) : '',
+                unknownSeconds: session.unknownSeconds != null ? String(Math.round(session.unknownSeconds)) : '',
+                startAddress,
+                endAddress,
                 endLocation: JSON.stringify({
                   latitude: endLoc.latitude || 0,
                   longitude: endLoc.longitude || 0,
@@ -175,6 +218,11 @@ export async function syncPendingSessions() {
               endTime: session.endTime,
               durationSeconds: String(Math.round(session.durationSeconds || 0)),
               distanceMeters: String(Math.round(session.distanceMeters || 0)),
+              movingSeconds: session.movingSeconds != null ? String(Math.round(session.movingSeconds)) : '',
+              idleSeconds: session.idleSeconds != null ? String(Math.round(session.idleSeconds)) : '',
+              unknownSeconds: session.unknownSeconds != null ? String(Math.round(session.unknownSeconds)) : '',
+              startAddress,
+              endAddress,
               remarks: session.remarks || session.rawRemarks || '',
               startLocation: JSON.stringify(session.startLocation || null),
               endLocation: JSON.stringify(session.endLocation || null),
@@ -194,6 +242,11 @@ export async function syncPendingSessions() {
           await apiPost('/recovery/sync', {
             ...session,
             vehicleType: mode,
+            movingSeconds: session.movingSeconds != null ? Math.round(session.movingSeconds) : null,
+            idleSeconds: session.idleSeconds != null ? Math.round(session.idleSeconds) : null,
+            unknownSeconds: session.unknownSeconds != null ? Math.round(session.unknownSeconds) : null,
+            startAddress,
+            endAddress,
             points: session.points || [],
           });
 

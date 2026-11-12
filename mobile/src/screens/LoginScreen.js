@@ -8,6 +8,8 @@ import { Ionicons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
 import { apiPost, warmUpServer } from '../api';
 
+const BRANCH_OPTIONS = ['Branch 1', 'Branch 2'];
+
 // ─── Helpers to detect transient/connectivity errors ──────────────────────
 function isNetworkError(e) {
   if (!e) return false;
@@ -40,6 +42,8 @@ function verifyLocalOtp(phone, otp) {
 export default function LoginScreen({ navigation }) {
   useEffect(() => { warmUpServer(); }, []);
   const [step, setStep] = useState('PHONE'); // 'PHONE' | 'OTP'
+  const [branch, setBranch] = useState(''); // Default is nothing selected
+  const [branchDropdownOpen, setBranchDropdownOpen] = useState(false);
   const [phone, setPhone] = useState('');
   const [otp, setOtp] = useState('');
   const [displayedOtp, setDisplayedOtp] = useState(''); // shown on screen for demo
@@ -49,6 +53,10 @@ export default function LoginScreen({ navigation }) {
 
   const requestOtp = async () => {
     setError('');
+    if (!branch) {
+      setError('Please select a branch.');
+      return;
+    }
     const trimmed = phone.trim();
     if (trimmed.length < 7) {
       setError('Enter a valid phone number.');
@@ -57,14 +65,16 @@ export default function LoginScreen({ navigation }) {
     setLoading(true);
     try {
       console.log('[Login] Requesting OTP from backend for phone:', trimmed);
-      const data = await apiPost('/auth/otp/generate', { phone: trimmed });
+      const data = await apiPost('/auth/otp/generate', { phone: trimmed, branch });
       console.log('[Login] OTP received from backend');
       setDisplayedOtp(data.otp || '');
       setIsOfflineMode(false);
       setStep('OTP');
     } catch (e) {
-      // Any connectivity / server error → inform user to wait for server warm-up
-      if (isNetworkError(e)) {
+      if (e.status === 403) {
+        console.warn('[Login] OTP generate error 403:', e.message);
+        setError(e.message || 'This number is not registered under the selected branch.');
+      } else if (isNetworkError(e)) {
         console.warn('[Login] Backend unreachable, server warming up.');
         setError('Server is waking up. Wait 30 seconds and tap Generate OTP again.');
       } else {
@@ -101,7 +111,7 @@ export default function LoginScreen({ navigation }) {
           name: 'Demo Agent',
           phone: phone.trim(),
           role: 'field_officer',
-          assignedArea: 'Demo Area',
+          assignedArea: branch || 'Demo Area',
         };
         await SecureStore.setItemAsync('token', 'offline_demo_token');
         await SecureStore.setItemAsync('staff', JSON.stringify(demoStaff));
@@ -109,7 +119,7 @@ export default function LoginScreen({ navigation }) {
         navigation.replace('MainTabs');
       } else {
         console.log('[Login] Verifying OTP with backend');
-        const data = await apiPost('/auth/otp/verify', { phone: phone.trim(), otp: trimmedOtp });
+        const data = await apiPost('/auth/otp/verify', { phone: phone.trim(), otp: trimmedOtp, branch });
         await SecureStore.setItemAsync('token', data.token);
         await SecureStore.setItemAsync('staff', JSON.stringify(data.staff));
         console.log('[Login] Backend OTP verify success, staff:', data.staff?.name);
@@ -117,7 +127,9 @@ export default function LoginScreen({ navigation }) {
       }
     } catch (e) {
       console.warn('[Login] OTP verify error:', e.status, e.message);
-      if (isNetworkError(e)) {
+      if (e.status === 403) {
+        setError(e.message || 'This number is not registered under the selected branch.');
+      } else if (isNetworkError(e)) {
         setError('Cannot reach the server. Check your internet and try again.');
       } else {
         setError(e.message || 'Verification failed. Please try again.');
@@ -152,6 +164,54 @@ export default function LoginScreen({ navigation }) {
 
         {step === 'PHONE' ? (
           <View style={styles.formContainer}>
+            <Text style={styles.label}>Select Branch</Text>
+            <TouchableOpacity
+              style={[styles.dropdownWrapper, branchDropdownOpen && styles.dropdownWrapperOpen]}
+              onPress={() => setBranchDropdownOpen(!branchDropdownOpen)}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="business-outline" size={20} color="#64748B" style={styles.inputIcon} />
+              <Text style={[styles.dropdownText, !branch && styles.dropdownPlaceholder]}>
+                {branch || 'Select Branch'}
+              </Text>
+              <Ionicons
+                name={branchDropdownOpen ? 'chevron-up' : 'chevron-down'}
+                size={20}
+                color="#64748B"
+              />
+            </TouchableOpacity>
+
+            {branchDropdownOpen && (
+              <View style={styles.dropdownMenu}>
+                {BRANCH_OPTIONS.map((item) => (
+                  <TouchableOpacity
+                    key={item}
+                    style={[
+                      styles.dropdownItem,
+                      branch === item && styles.dropdownItemSelected,
+                    ]}
+                    onPress={() => {
+                      setBranch(item);
+                      setBranchDropdownOpen(false);
+                      setError('');
+                    }}
+                  >
+                    <Text
+                      style={[
+                        styles.dropdownItemText,
+                        branch === item && styles.dropdownItemTextSelected,
+                      ]}
+                    >
+                      {item}
+                    </Text>
+                    {branch === item && (
+                      <Ionicons name="checkmark-circle" size={18} color="#2563EB" />
+                    )}
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
+
             <Text style={styles.label}>Mobile Number</Text>
             <View style={styles.inputWrapper}>
               <Ionicons name="call-outline" size={20} color="#64748B" style={styles.inputIcon} />
@@ -175,9 +235,12 @@ export default function LoginScreen({ navigation }) {
             ) : null}
 
             <TouchableOpacity
-              style={[styles.primaryBtn, phone.trim().length < 7 && styles.btnDisabled]}
+              style={[
+                styles.primaryBtn,
+                (loading || !branch || phone.trim().length < 7) && styles.btnDisabled,
+              ]}
               onPress={requestOtp}
-              disabled={loading || phone.trim().length < 7}
+              disabled={loading || !branch || phone.trim().length < 7}
             >
               {loading ? (
                 <ActivityIndicator color="#fff" />
@@ -269,6 +332,28 @@ const styles = StyleSheet.create({
     fontSize: 13, fontWeight: '600', color: '#0F172A',
     marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5,
   },
+  dropdownWrapper: {
+    flexDirection: 'row', alignItems: 'center', backgroundColor: '#F8FAFC',
+    borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 12,
+    marginBottom: 16, paddingHorizontal: 16, height: 56,
+  },
+  dropdownWrapperOpen: { borderColor: '#2563EB' },
+  dropdownText: { flex: 1, fontSize: 16, color: '#0F172A', fontWeight: '500' },
+  dropdownPlaceholder: { color: '#94A3B8' },
+  dropdownMenu: {
+    backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#E2E8F0',
+    borderRadius: 12, marginTop: -8, marginBottom: 16, overflow: 'hidden',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06, shadowRadius: 4, elevation: 3,
+  },
+  dropdownItem: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 16, paddingVertical: 14,
+    borderBottomWidth: 1, borderBottomColor: '#F1F5F9',
+  },
+  dropdownItemSelected: { backgroundColor: '#EFF6FF' },
+  dropdownItemText: { fontSize: 15, color: '#334155', fontWeight: '500' },
+  dropdownItemTextSelected: { color: '#2563EB', fontWeight: '700' },
   inputWrapper: {
     flexDirection: 'row', alignItems: 'center', backgroundColor: '#F8FAFC',
     borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 12,
