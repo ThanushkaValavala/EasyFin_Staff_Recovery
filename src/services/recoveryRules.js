@@ -3,15 +3,15 @@ const Evidence = require('../models/Evidence');
 const memoryStore = require('./store');
 const { getIsConnected } = require('../config/db');
 
-const VEHICLE_TYPES = ['WALK', 'CYCLE', 'BIKE', 'SCOOTER', 'CAR', 'AUTO', 'OTHER'];
+const VEHICLE_TYPES = ['WALK', 'BIKE', 'CAR', 'OTHER'];
 
 // Checks the vehicle type and number entered when a recovery starts.
 const validateVehicle = (vehicleType, vehicleNumber) => {
   const type = String(vehicleType || '').trim().toUpperCase();
   const number = String(vehicleNumber || '').replace(/[\s-]/g, '').toUpperCase();
 
-  // Walk and Cycle modes: no vehicle number required
-  if (type === 'WALK' || type === 'CYCLE') {
+  // Walk and Other modes: no vehicle number required
+  if (type === 'WALK' || type === 'OTHER') {
     return { vehicleType: type, vehicleNumber: '' };
   }
 
@@ -34,27 +34,31 @@ const pickLocation = (loc) => {
 
   const latitude = Number(loc.latitude);
   const longitude = Number(loc.longitude);
+  const accuracy = Number(loc.accuracy) || 0;
 
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
     return undefined;
   }
 
-  return { latitude, longitude };
+  return { latitude, longitude, accuracy };
 };
 
 // Rules before a recovery can be completed:
 //  1. at least one proof photo must be uploaded
 //  2. if no money was collected, remarks are required
 // Returns an error message, or null when everything is fine.
-const validateCompletion = async ({ sessionId, staffId, paymentAmount, visitNotes }) => {
+const validateCompletion = async ({ sessionId, staffId, paymentAmount, visitNotes, models }, modelsParam) => {
+  const activeModels = modelsParam || models;
+  const RecoverySessionModel = (activeModels && activeModels.RecoverySession) || RecoverySession;
+  const EvidenceModel = (activeModels && activeModels.Evidence) || Evidence;
   let session;
   let evidenceCount;
   let hasSpeedometer = false;
 
-  if (getIsConnected()) {
-    session = await RecoverySession.findOne({ sessionId, staffId });
-    evidenceCount = await Evidence.countDocuments({ sessionId, staffId });
-    hasSpeedometer = (await Evidence.countDocuments({ sessionId, staffId, caption: /^Speedometer/i })) > 0;
+  if (activeModels || getIsConnected()) {
+    session = await RecoverySessionModel.findOne({ sessionId, staffId });
+    evidenceCount = await EvidenceModel.countDocuments({ sessionId, staffId });
+    hasSpeedometer = (await EvidenceModel.countDocuments({ sessionId, staffId, caption: /^Speedometer/i })) > 0;
   } else {
     await memoryStore.initDefaults();
     session = memoryStore.sessions.find(

@@ -61,7 +61,15 @@ router.post('/sessions/:sessionId/finish', protect, upload.safeSingle('endPhoto'
 router.post('/sessions/:sessionId/finish-walk', protect, flow.finishSessionWalk);
 router.get('/evidence/:evidenceId/image', protect, evidenceController.getEvidenceImage);
 router.get('/history', protect, flow.getHistory);
-router.post('/sync', protect, flow.syncOfflineSession);
+router.post(
+  '/sync',
+  protect,
+  upload.safeFields([
+    { name: 'startPhoto', maxCount: 1 },
+    { name: 'endPhoto', maxCount: 1 }
+  ]),
+  flow.syncOfflineSession
+);
 router.get('/stats', protect, flow.getAgentStats);
 
 module.exports = router;

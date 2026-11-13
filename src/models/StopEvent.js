@@ -17,4 +17,6 @@ const stopEventSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-module.exports = mongoose.model('StopEvent', stopEventSchema);
+const StopEvent = mongoose.model('StopEvent', stopEventSchema);
+StopEvent.schema = stopEventSchema;
+module.exports = StopEvent;

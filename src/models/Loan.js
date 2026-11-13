@@ -33,4 +33,6 @@ loanSchema.pre('save', function (next) {
   next();
 });
 
-module.exports = mongoose.model('Loan', loanSchema);
+const Loan = mongoose.model('Loan', loanSchema);
+Loan.schema = loanSchema;
+module.exports = Loan;

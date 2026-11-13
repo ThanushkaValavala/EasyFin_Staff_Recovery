@@ -4,10 +4,26 @@ const Staff = require('../models/Staff');
 const OtpRecord = require('../models/OtpRecord');
 const memoryStore = require('../services/store');
 const { getIsConnected } = require('../config/db');
+const { getModels, isBranchDbConnected } = require('../config/branchDb');
 const { generateStrongPassword } = require('../services/passwordGenerator');
 const { normalizePhoneNumber } = require('../utils/phoneNormalizer');
+async function isNumberInBranch(branch, phone, BranchMemberModel) {
+  if (!BranchMemberModel || !branch || !phone) {
+    return false;
+  }
 
-const generateToken = (staff) => {
+  const normalizedPhone = BranchMemberModel.normalize(phone);
+  if (!normalizedPhone || normalizedPhone.length !== 10) {
+    return false;
+  }
+
+  const member = await BranchMemberModel.findOne({ phone: normalizedPhone, branch, isActive: true });
+  return !!member;
+}
+
+exports.isNumberInBranch = isNumberInBranch;
+
+const generateToken = (staff, branch) => {
   const secret = process.env.JWT_SECRET;
 
   if (!secret) {
@@ -15,6 +31,7 @@ const generateToken = (staff) => {
   }
 
   const normalizedPhone = staff.phone ? normalizePhoneNumber(staff.phone) : '';
+  const agentBranch = branch || staff.branch || staff.assignedArea || '';
 
   return jwt.sign(
     {
@@ -23,7 +40,8 @@ const generateToken = (staff) => {
       employeeId: staff.employeeId,
       email: staff.email,
       phone: normalizedPhone,
-      role: staff.role
+      role: staff.role,
+      branch: agentBranch
     },
     secret,
     { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
@@ -244,64 +262,70 @@ const MAX_VERIFY_ATTEMPTS = 5;
 
 exports.generateOtp = async (req, res) => {
   try {
+    const rawBranch = req.body.branch;
+    const branch = rawBranch ? String(rawBranch).trim() : '';
+    if (!branch) {
+      return res.status(400).json({ success: false, message: 'Please select a branch.' });
+    }
+
     const rawPhone = String(req.body.phone || '').trim();
     const phone = normalizePhoneNumber(rawPhone);
     if (!phone || phone.length < 8) {
       return res.status(400).json({ success: false, message: 'Valid phone number is required.' });
     }
 
+    if (!isBranchDbConnected(branch)) {
+      return res.status(503).json({
+        success: false,
+        message: 'Verification service unavailable. Try again.'
+      });
+    }
+
+    const models = getModels(branch);
+    if (!models) {
+      return res.status(503).json({
+        success: false,
+        message: 'Verification service unavailable. Try again.'
+      });
+    }
+    const { BranchMember: BranchMemberModel, OtpRecord: OtpRecordModel } = models;
+
+    const isAllowed = await isNumberInBranch(branch, rawPhone, BranchMemberModel);
+    if (!isAllowed) {
+      return res.status(403).json({
+        success: false,
+        message: 'This number is not registered under the selected branch.'
+      });
+    }
+
     const now = Date.now();
 
-    if (getIsConnected()) {
-      // Check resend cooldown
-      const existing = await OtpRecord.findOne({ phone });
-      if (existing && existing.lastSentAt) {
-        const elapsed = now - new Date(existing.lastSentAt).getTime();
-        if (elapsed < RESEND_COOLDOWN_MS) {
-          const waitSec = Math.ceil((RESEND_COOLDOWN_MS - elapsed) / 1000);
-          return res.status(429).json({
-            success: false,
-            message: `Please wait ${waitSec} seconds before requesting another OTP.`
-          });
-        }
-      }
-
-      const otp = String(Math.floor(100000 + Math.random() * 900000));
-      const expiresAt = new Date(now + 10 * 60 * 1000); // 10 minutes
-
-      await OtpRecord.deleteMany({ phone });
-      await OtpRecord.create({ phone, otp, expiresAt, attempts: 0, lastSentAt: new Date(now) });
-      console.log(`[OTP] Stored in MongoDB for phone ${phone}, expires ${expiresAt.toISOString()}`);
-
-      return res.status(200).json({
-        success: true,
-        message: 'OTP generated.',
-        otp, // visible for demo
-        phone,
-      });
-    } else {
-      // MongoDB unavailable — fall back to memory
-      const stored = otpFallbackStore.get(phone);
-      if (stored && stored.lastSentAt && now - stored.lastSentAt < RESEND_COOLDOWN_MS) {
-        const waitSec = Math.ceil((RESEND_COOLDOWN_MS - (now - stored.lastSentAt)) / 1000);
+    // Check resend cooldown
+    const existing = await OtpRecordModel.findOne({ phone });
+    if (existing && existing.lastSentAt) {
+      const elapsed = now - new Date(existing.lastSentAt).getTime();
+      if (elapsed < RESEND_COOLDOWN_MS) {
+        const waitSec = Math.ceil((RESEND_COOLDOWN_MS - elapsed) / 1000);
         return res.status(429).json({
           success: false,
           message: `Please wait ${waitSec} seconds before requesting another OTP.`
         });
       }
-
-      const otp = String(Math.floor(100000 + Math.random() * 900000));
-      const expiresAt = now + 10 * 60 * 1000;
-      otpFallbackStore.set(phone, { otp, expiresAt, attempts: 0, lastSentAt: now });
-      console.warn('[OTP] MongoDB unavailable — using in-memory fallback for phone', phone);
-
-      return res.status(200).json({
-        success: true,
-        message: 'OTP generated.',
-        otp,
-        phone,
-      });
     }
+
+    const otp = String(Math.floor(100000 + Math.random() * 900000));
+    const expiresAt = new Date(now + 10 * 60 * 1000); // 10 minutes
+
+    await OtpRecordModel.deleteMany({ phone });
+    await OtpRecordModel.create({ phone, otp, expiresAt, attempts: 0, lastSentAt: new Date(now) });
+    console.log(`[OTP] Stored in MongoDB for phone ${phone}, expires ${expiresAt.toISOString()}`);
+
+    return res.status(200).json({
+      success: true,
+      message: 'OTP generated.',
+      otp, // visible for demo
+      phone,
+    });
   } catch (error) {
     console.error('generateOtp error:', error);
     return res.status(500).json({ success: false, message: 'Could not generate OTP.' });
@@ -310,6 +334,12 @@ exports.generateOtp = async (req, res) => {
 
 exports.verifyOtp = async (req, res) => {
   try {
+    const rawBranch = req.body.branch;
+    const branch = rawBranch ? String(rawBranch).trim() : '';
+    if (!branch) {
+      return res.status(400).json({ success: false, message: 'Please select a branch.' });
+    }
+
     const rawPhone = String(req.body.phone || '').trim();
     const phone = normalizePhoneNumber(rawPhone);
     const otp = String(req.body.otp || '').trim();
@@ -318,118 +348,94 @@ exports.verifyOtp = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Phone and OTP are required.' });
     }
 
+    if (!isBranchDbConnected(branch)) {
+      return res.status(503).json({
+        success: false,
+        message: 'Verification service unavailable. Try again.'
+      });
+    }
+
+    const models = getModels(branch);
+    if (!models) {
+      return res.status(503).json({
+        success: false,
+        message: 'Verification service unavailable. Try again.'
+      });
+    }
+    const { BranchMember: BranchMemberModel, OtpRecord: OtpRecordModel, Staff: StaffModel } = models;
+
+    const isAllowed = await isNumberInBranch(branch, rawPhone, BranchMemberModel);
+    if (!isAllowed) {
+      return res.status(403).json({
+        success: false,
+        message: 'This number is not registered under the selected branch.'
+      });
+    }
+
     let otpValid = false;
 
-    if (getIsConnected()) {
-      const record = await OtpRecord.findOne({ phone });
+    const record = await OtpRecordModel.findOne({ phone });
 
-      if (!record) {
-        return res.status(400).json({ success: false, message: 'No OTP found. Request a new one.' });
-      }
-
-      if (new Date() > new Date(record.expiresAt)) {
-        await OtpRecord.deleteMany({ phone });
-        return res.status(400).json({ success: false, message: 'OTP has expired. Request a new one.' });
-      }
-
-      // Check max attempts
-      if ((record.attempts || 0) >= MAX_VERIFY_ATTEMPTS) {
-        await OtpRecord.deleteMany({ phone });
-        return res.status(429).json({
-          success: false,
-          message: 'Maximum verification attempts exceeded. Please request a new OTP.'
-        });
-      }
-
-      if (record.otp !== otp) {
-        await OtpRecord.updateOne({ _id: record._id }, { $inc: { attempts: 1 } });
-        return res.status(400).json({ success: false, message: 'Incorrect OTP. Please try again.' });
-      }
-
-      // Valid — delete it so it can't be reused
-      await OtpRecord.deleteMany({ phone });
-      otpValid = true;
-      console.log(`[OTP] Verified and consumed for phone ${phone}`);
-    } else {
-      // MongoDB unavailable — check fallback store
-      const stored = otpFallbackStore.get(phone);
-      if (!stored) {
-        return res.status(400).json({ success: false, message: 'No OTP found. Request a new one.' });
-      }
-      if (Date.now() > stored.expiresAt) {
-        otpFallbackStore.delete(phone);
-        return res.status(400).json({ success: false, message: 'OTP has expired. Request a new one.' });
-      }
-      if ((stored.attempts || 0) >= MAX_VERIFY_ATTEMPTS) {
-        otpFallbackStore.delete(phone);
-        return res.status(429).json({
-          success: false,
-          message: 'Maximum verification attempts exceeded. Please request a new OTP.'
-        });
-      }
-      if (stored.otp !== otp) {
-        stored.attempts = (stored.attempts || 0) + 1;
-        return res.status(400).json({ success: false, message: 'Incorrect OTP. Please try again.' });
-      }
-      otpFallbackStore.delete(phone);
-      otpValid = true;
-      console.warn('[OTP] Verified via in-memory fallback (MongoDB was unavailable)');
+    if (!record) {
+      return res.status(400).json({ success: false, message: 'No OTP found. Request a new one.' });
     }
+
+    if (new Date() > new Date(record.expiresAt)) {
+      await OtpRecordModel.deleteMany({ phone });
+      return res.status(400).json({ success: false, message: 'OTP has expired. Request a new one.' });
+    }
+
+    // Check max attempts
+    if ((record.attempts || 0) >= MAX_VERIFY_ATTEMPTS) {
+      await OtpRecordModel.deleteMany({ phone });
+      return res.status(429).json({
+        success: false,
+        message: 'Maximum verification attempts exceeded. Please request a new OTP.'
+      });
+    }
+
+    if (record.otp !== otp) {
+      await OtpRecordModel.updateOne({ _id: record._id }, { $inc: { attempts: 1 } });
+      return res.status(400).json({ success: false, message: 'Incorrect OTP. Please try again.' });
+    }
+
+    // Valid — delete it so it can't be reused
+    await OtpRecordModel.deleteMany({ phone });
+    otpValid = true;
+    console.log(`[OTP] Verified and consumed for phone ${phone}`);
 
     if (!otpValid) {
       return res.status(400).json({ success: false, message: 'OTP verification failed.' });
     }
 
     // Look up staff by normalized phone number (or create a permanent agent record)
-    let staff = null;
-    if (getIsConnected()) {
-      staff = await Staff.findOne({ phone });
-    } else {
-      await memoryStore.initDefaults();
-      staff = memoryStore.staffList.find((s) => s.phone === phone);
-    }
+    let staff = await StaffModel.findOne({ phone });
 
     // If no matching staff, create a permanent agent profile
     if (!staff) {
-      if (getIsConnected()) {
-        try {
-          staff = await Staff.create({
-            employeeId: `PHONE_${phone.replace(/\D/g, '').slice(-8)}`,
-            name: 'Demo Agent',
-            username: `agent_${phone.replace(/\D/g, '').slice(-10)}`,
-            phone,
-            email: `demo_${phone.replace(/\D/g, '')}@easyfin.demo`,
-            assignedArea: 'Demo Area',
-            role: 'field_officer',
-            password: 'Demo@1234Secure',
-            isActive: true,
-          });
-        } catch (e) {
-          if (e.code === 11000) {
-            staff = await Staff.findOne({ phone });
-            if (!staff) staff = await Staff.findOne({ email: `demo_${phone.replace(/\D/g, '')}@easyfin.demo` });
-          } else {
-            throw e;
-          }
-        }
-      } else {
-        await memoryStore.initDefaults();
-        const demoStaff = {
-          _id: `5f43a0b1c2d3e4f5a6b7c8d9`,
-          employeeId: 'DEMO001',
+      try {
+        staff = await StaffModel.create({
+          employeeId: `PHONE_${phone.replace(/\D/g, '').slice(-8)}`,
           name: 'Demo Agent',
+          username: `agent_${phone.replace(/\D/g, '').slice(-10)}`,
           phone,
-          email: `demo_${phone}@easyfin.demo`,
+          email: `demo_${phone.replace(/\D/g, '')}@easyfin.demo`,
+          assignedArea: branch,
           role: 'field_officer',
-          assignedArea: 'Demo Area',
+          password: 'Demo@1234Secure',
           isActive: true,
-        };
-        memoryStore.staffList.push(demoStaff);
-        staff = demoStaff;
+        });
+      } catch (e) {
+        if (e.code === 11000) {
+          staff = await StaffModel.findOne({ phone });
+          if (!staff) staff = await StaffModel.findOne({ email: `demo_${phone.replace(/\D/g, '')}@easyfin.demo` });
+        } else {
+          throw e;
+        }
       }
     }
 
-    const token = generateToken(staff);
+    const token = generateToken(staff, branch);
 
     const safeStaff = typeof staff.toJSON === 'function' ? staff.toJSON() : { ...staff };
     delete safeStaff.password;

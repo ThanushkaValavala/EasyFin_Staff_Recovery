@@ -1,6 +1,6 @@
-const Assignment = require('../models/Assignment');
-const Customer = require('../models/Customer');
-const Loan = require('../models/Loan');
+
+
+
 const memoryStore = require('../services/store');
 const { getIsConnected } = require('../config/db');
 
@@ -13,12 +13,13 @@ const maskCustomer = (c) => {
 
 exports.getAssignedCases = async (req, res) => {
   try {
-    const staffId = req.staff._id.toString();
+    const { Staff, Customer, Loan, Assignment } = req.models || {};
+    const agentId = (req.agent && req.agent._id) || (req.staff && req.staff._id);
+    const staffId = agentId.toString();
     const { search, status, priority } = req.query;
 
-    if (getIsConnected()) {
-      // We only query by staff and priority. We will filter by status manually below.
-      let query = { staffId };
+    if (req.models || getIsConnected()) {
+      let query = { $or: [{ agentId }, { staffId }] };
       if (priority && priority !== 'ALL') {
         query.priority = priority;
       }
@@ -160,10 +161,11 @@ exports.getAssignedCases = async (req, res) => {
 
 exports.getCaseDetail = async (req, res) => {
   try {
+    const { Staff, Customer, Loan, Assignment } = req.models || {};
     const { id } = req.params;
     const staffId = req.staff._id.toString();
 
-    if (getIsConnected()) {
+    if (req.models || getIsConnected()) {
       const assignment = await Assignment.findOne({
         $or: [{ _id: id }, { assignmentId: id }],
         staffId
@@ -223,17 +225,18 @@ exports.getCaseDetail = async (req, res) => {
     });
   }
 };
-const Staff = require('../models/Staff');
+
 
 // Admin / supervisor adds a customer + loan and assigns it to a staff member.
 exports.createCase = async (req, res) => {
   let cust = null;
   let ln = null;
   try {
+    const { Staff, Customer, Loan, Assignment } = req.models || {};
     if (!['admin', 'recovery_supervisor'].includes(req.staff.role)) {
       return res.status(403).json({ success: false, message: 'Only an admin or supervisor can add cases.' });
     }
-    if (!getIsConnected()) {
+    if (!req.models && !getIsConnected()) {
       return res.status(503).json({ success: false, message: 'Database is not connected.' });
     }
 
@@ -348,11 +351,13 @@ exports.createCase = async (req, res) => {
 // Area search: this staff member's cases matching an area/location, grouped by common place.
 exports.searchByArea = async (req, res) => {
   try {
-    if (!getIsConnected()) {
+    const { Staff, Customer, Loan, Assignment } = req.models || {};
+    if (!req.models && !getIsConnected()) {
       return res.status(503).json({ success: false, message: 'Database is not connected.' });
     }
     const q = String(req.query.q || '').trim().toLowerCase();
-    const assignments = await Assignment.find({ staffId: req.staff._id, recoveryStatus: { $ne: 'IN_PROGRESS' } })
+    const agentId = (req.agent && req.agent._id) || (req.staff && req.staff._id);
+      const assignments = await Assignment.find({ $or: [{ agentId }, { staffId: agentId }], recoveryStatus: { $ne: 'IN_PROGRESS' } })
       .populate('customerId')
       .populate('loanId');
 

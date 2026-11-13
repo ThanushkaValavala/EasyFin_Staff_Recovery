@@ -1,15 +1,16 @@
 const { v4: uuidv4 } = require('uuid');
-const RecoverySession = require('../models/RecoverySession');
-const TrackingPoint = require('../models/TrackingPoint');
-const StopEvent = require('../models/StopEvent');
-const Assignment = require('../models/Assignment');
-const Evidence = require('../models/Evidence');
+
+
+
+
+
 const memoryStore = require('../services/store');
 const { getIsConnected } = require('../config/db');
 const { getDistanceInMeters } = require('../services/stopDetectionService');
 const rules = require('../services/recoveryRules');
 
 exports.startSession = async (req, res) => {
+  const { RecoverySession, TrackingPoint, StopEvent, Assignment, Evidence } = req.models || {};
   try {
     const staffId = req.staff._id.toString();
     const {
@@ -36,7 +37,7 @@ exports.startSession = async (req, res) => {
       });
     }
 
-    if (getIsConnected()) {
+    if (req.models || getIsConnected()) {
       let activeSession = await RecoverySession.findOne({
         staffId,
         status: 'ACTIVE'
@@ -167,10 +168,11 @@ exports.startSession = async (req, res) => {
 };
 
 exports.getActiveSession = async (req, res) => {
+  const { RecoverySession, TrackingPoint, StopEvent, Assignment, Evidence } = req.models || {};
   try {
     const staffId = req.staff._id.toString();
 
-    if (getIsConnected()) {
+    if (req.models || getIsConnected()) {
       const session = await RecoverySession.findOne({
         staffId,
         status: 'ACTIVE'
@@ -250,10 +252,12 @@ exports.getActiveSession = async (req, res) => {
 };
 
 exports.addTrackingPoints = async (req, res) => {
+  const { RecoverySession, TrackingPoint, StopEvent, Assignment, Evidence } = req.models || {};
   try {
     const { sessionId } = req.params;
-    const { points, incrementalDistanceMeters } = req.body;
-    const staffId = req.staff._id.toString();
+    const { points, incrementalDistanceMeters, batchId } = req.body;
+    const agentId = (req.agent && req.agent._id) || req.staff._id;
+    const staffId = agentId.toString();
 
     if (!points || !Array.isArray(points) || points.length === 0) {
       return res.status(400).json({
@@ -262,8 +266,7 @@ exports.addTrackingPoints = async (req, res) => {
       });
     }
 
-    if (getIsConnected()) {
-      const agentId = (req.agent && req.agent._id) || req.staff._id;
+    if (req.models || getIsConnected()) {
       const session = await RecoverySession.findOne({
         sessionId,
         $or: [{ agentId }, { staffId }]
@@ -272,7 +275,16 @@ exports.addTrackingPoints = async (req, res) => {
       if (!session) {
         return res.status(404).json({
           success: false,
-          message: 'Session not found.'
+          message: 'Session not found or access denied.'
+        });
+      }
+
+      // If batch was already processed, respond idempotently without adding distance again
+      if (batchId && session.processedBatchIds && session.processedBatchIds.includes(batchId)) {
+        return res.status(200).json({
+          success: true,
+          message: 'Batch already processed.',
+          batchId
         });
       }
 
@@ -280,20 +292,36 @@ exports.addTrackingPoints = async (req, res) => {
         sessionId,
         agentId,
         staffId,
-        latitude: p.latitude,
-        longitude: p.longitude,
-        accuracy: p.accuracy || 0,
-        altitude: p.altitude || 0,
-        speed: p.speed || 0,
+        pointId: p.pointId || `${sessionId}_${new Date(p.timestamp || Date.now()).getTime()}_${Number(p.latitude).toFixed(6)}_${Number(p.longitude).toFixed(6)}`,
+        latitude: Number(p.latitude),
+        longitude: Number(p.longitude),
+        accuracy: Number(p.accuracy) || 0,
+        altitude: Number(p.altitude) || 0,
+        speed: Number(p.speed) || 0,
         timestamp: p.timestamp ? new Date(p.timestamp) : new Date()
       }));
 
-      await TrackingPoint.insertMany(docs);
+      try {
+        await TrackingPoint.insertMany(docs, { ordered: false });
+      } catch (insertErr) {
+        // Ignore duplicate pointId errors (code 11000)
+        if (insertErr.code !== 11000 && !insertErr.writeErrors?.every(e => e.code === 11000)) {
+          throw insertErr;
+        }
+      }
 
-      if (incrementalDistanceMeters && incrementalDistanceMeters > 0) {
-        await RecoverySession.findOneAndUpdate(
+      const updateOp = {};
+      if (batchId) {
+        updateOp.$addToSet = { processedBatchIds: batchId };
+      }
+      if (incrementalDistanceMeters && Number(incrementalDistanceMeters) > 0) {
+        updateOp.$inc = { distanceMeters: Number(incrementalDistanceMeters) };
+      }
+
+      if (Object.keys(updateOp).length > 0) {
+        await RecoverySession.updateOne(
           { sessionId, $or: [{ agentId }, { staffId }] },
-          { $inc: { distanceMeters: incrementalDistanceMeters } }
+          updateOp
         );
       }
 
@@ -319,6 +347,7 @@ exports.addTrackingPoints = async (req, res) => {
         memoryStore.trackingPoints.push({
           sessionId,
           staffId,
+          pointId: p.pointId,
           latitude: p.latitude,
           longitude: p.longitude,
           accuracy: p.accuracy || 0,
@@ -348,6 +377,7 @@ exports.addTrackingPoints = async (req, res) => {
 };
 
 exports.recordStop = async (req, res) => {
+  const { RecoverySession, TrackingPoint, StopEvent, Assignment, Evidence } = req.models || {};
   try {
     const { sessionId } = req.params;
     const staffId = req.staff._id.toString();
@@ -371,7 +401,7 @@ exports.recordStop = async (req, res) => {
       });
     }
 
-    if (getIsConnected()) {
+    if (req.models || getIsConnected()) {
       const session = await RecoverySession.findOne({ sessionId, staffId });
 
       if (!session) {
@@ -449,13 +479,14 @@ exports.recordStop = async (req, res) => {
 };
 
 exports.updateSessionOutcome = async (req, res) => {
+  const { RecoverySession, TrackingPoint, StopEvent, Assignment, Evidence } = req.models || {};
   try {
     const { sessionId } = req.params;
     const staffId = req.staff._id.toString();
 
     const { outcome, visitNotes, paymentAmount, promiseDate } = req.body;
 
-    if (getIsConnected()) {
+    if (req.models || getIsConnected()) {
       const update = {};
 
       if (outcome !== undefined) update.outcome = outcome;
@@ -522,6 +553,7 @@ exports.updateSessionOutcome = async (req, res) => {
 };
 
 exports.endSession = async (req, res) => {
+  const { RecoverySession, TrackingPoint, StopEvent, Assignment, Evidence } = req.models || {};
   try {
     const { sessionId } = req.params;
     const staffId = req.staff._id.toString();
@@ -540,7 +572,8 @@ exports.endSession = async (req, res) => {
       sessionId,
       staffId,
       paymentAmount,
-      visitNotes
+      visitNotes,
+      models: req.models
     });
 
     if (completionError) {
@@ -552,7 +585,7 @@ exports.endSession = async (req, res) => {
 
     const endTime = new Date();
 
-    if (getIsConnected()) {
+    if (req.models || getIsConnected()) {
       const session = await RecoverySession.findOne({ sessionId, staffId });
 
       if (!session) {
@@ -657,6 +690,7 @@ exports.endSession = async (req, res) => {
 
 // GET COMPLETE JOURNEY DETAILS
 exports.getJourneyDetails = async (req, res) => {
+  const { RecoverySession, TrackingPoint, StopEvent, Assignment, Evidence } = req.models || {};
   try {
     const { sessionId } = req.params;
     const staffId = req.staff._id.toString();
@@ -666,7 +700,7 @@ exports.getJourneyDetails = async (req, res) => {
     let stops;
     let evidences;
 
-    if (getIsConnected()) {
+    if (req.models || getIsConnected()) {
       session = await RecoverySession.findOne({ sessionId, staffId });
 
       if (!session) {

@@ -53,11 +53,27 @@ const recoverySessionSchema = new mongoose.Schema(
     },
     vehicleType: { type: String, default: '' },
     vehicleNumber: { type: String, default: '' },
-    deviceSessionId: { type: String, default: '', index: true },
-    startLocation: { latitude: { type: Number }, longitude: { type: Number } },
-    endLocation: { latitude: { type: Number }, longitude: { type: Number } }
+    deviceSessionId: { type: String, default: '' },
+    statsIncremented: { type: Boolean, default: false, index: true },
+    processedBatchIds: [{ type: String }],
+    movingSeconds: { type: Number, default: null },
+    idleSeconds: { type: Number, default: null },
+    unknownSeconds: { type: Number, default: null },
+    startAddress: { type: String, default: '' },
+    endAddress: { type: String, default: '' },
+    startLocation: { latitude: { type: Number }, longitude: { type: Number }, accuracy: { type: Number, default: 0 } },
+    endLocation: { latitude: { type: Number }, longitude: { type: Number }, accuracy: { type: Number, default: 0 } }
   },
   { timestamps: true }
+);
+
+recoverySessionSchema.index(
+  { deviceSessionId: 1 },
+  {
+    unique: true,
+    sparse: true,
+    partialFilterExpression: { deviceSessionId: { $type: 'string', $gt: '' } }
+  }
 );
 
 recoverySessionSchema.pre('save', function (next) {
@@ -70,4 +86,6 @@ recoverySessionSchema.pre('save', function (next) {
   next();
 });
 
-module.exports = mongoose.model('RecoverySession', recoverySessionSchema);
+const RecoverySession = mongoose.model('RecoverySession', recoverySessionSchema);
+RecoverySession.schema = recoverySessionSchema;
+module.exports = RecoverySession;

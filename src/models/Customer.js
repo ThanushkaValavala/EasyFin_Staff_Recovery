@@ -38,4 +38,6 @@ customerSchema.methods.toJSON = function () {
   return obj;
 };
 
-module.exports = mongoose.model('Customer', customerSchema);
+const Customer = mongoose.model('Customer', customerSchema);
+Customer.schema = customerSchema;
+module.exports = Customer;
