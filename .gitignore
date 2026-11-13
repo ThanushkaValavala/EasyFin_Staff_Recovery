@@ -9,3 +9,4 @@ npm-debug.log*
 uploads/
 
 *.bak
+users-backup.json
