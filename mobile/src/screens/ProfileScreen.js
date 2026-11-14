@@ -395,6 +395,19 @@ export default function ProfileScreen({ navigation }) {
         </View>
       ) : null}
 
+      {/* ── RECOVERIES PER DAY ─────────────────────────────────────────── */}
+      <TouchableOpacity
+        style={styles.recoveriesPerDayRow}
+        onPress={() => navigation.navigate('RecoveriesPerDay', { sessions: allSessions })}
+        activeOpacity={0.7}
+      >
+        <View style={styles.recoveriesPerDayLeft}>
+          <Ionicons name="calendar-outline" size={18} color="#2563EB" style={{ marginRight: 10 }} />
+          <Text style={styles.recoveriesPerDayTitle}>Recoveries Per Day</Text>
+        </View>
+        <Ionicons name="chevron-forward" size={18} color="#94A3B8" />
+      </TouchableOpacity>
+
       {/* ── COMPLETED RECOVERY HISTORY ─────────────────────────────────── */}
       <View style={styles.historyHeaderRow}>
         <Text style={styles.historySectionTitle}>Completed Recovery History</Text>
@@ -515,4 +528,13 @@ const styles = StyleSheet.create({
   },
   emptyTitle: { fontSize: 15, fontWeight: '700', color: '#334155', marginTop: 10 },
   emptySub: { fontSize: 12, color: '#64748B', textAlign: 'center', marginTop: 4 },
+  recoveriesPerDayRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    backgroundColor: '#FFFFFF', borderRadius: 14, padding: 16,
+    borderWidth: 1, borderColor: '#E2E8F0', marginBottom: 16,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.03, shadowRadius: 4, elevation: 1,
+  },
+  recoveriesPerDayLeft: { flexDirection: 'row', alignItems: 'center' },
+  recoveriesPerDayTitle: { fontSize: 14, fontWeight: '700', color: '#0F172A' },
 });

@@ -8,6 +8,7 @@ import StartRecoveryScreen from './src/screens/StartRecoveryScreen';
 import ActiveRecoveryScreen from './src/screens/ActiveRecoveryScreen';
 import CompleteScreen from './src/screens/CompleteScreen';
 import ProfileScreen from './src/screens/ProfileScreen';
+import RecoveriesPerDayScreen from './src/screens/RecoveriesPerDayScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -71,6 +72,16 @@ export default function App() {
             component={ProfileScreen}
             options={{
               title: 'Agent Profile & History',
+              headerTintColor: '#0F172A',
+            }}
+          />
+
+          {/* Recoveries Per Day analytics */}
+          <Stack.Screen
+            name="RecoveriesPerDay"
+            component={RecoveriesPerDayScreen}
+            options={{
+              title: 'Recoveries Per Day',
               headerTintColor: '#0F172A',
             }}
           />
