@@ -6,10 +6,12 @@ import {
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { apiGet } from '../api';
 import { syncPendingSessions } from '../utils/offlineStore';
 
 export default function DashboardScreen({ navigation }) {
+  const insets = useSafeAreaInsets();
   const [staff, setStaff] = useState(null);
   const [assignments, setAssignments] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -82,7 +84,7 @@ export default function DashboardScreen({ navigation }) {
   return (
     <ScrollView
       style={styles.container}
-      contentContainerStyle={{ padding: 20, paddingBottom: 60 }}
+      contentContainerStyle={{ padding: 20, paddingTop: insets.top + 12, paddingBottom: 60 }}
       refreshControl={
         <RefreshControl
           refreshing={refreshing}
@@ -119,13 +121,15 @@ export default function DashboardScreen({ navigation }) {
             <View style={[styles.iconBg, { backgroundColor: '#EFF6FF' }]}>
               <Ionicons name="briefcase" size={24} color="#2563EB" />
             </View>
-            <View style={{ marginLeft: 12 }}>
+            <View style={{ marginLeft: 12, flex: 1, minWidth: 0 }}>
               <Text style={styles.cardTitle}>Assigned Tasks</Text>
               <Text style={styles.cardSub}>Customer recovery cases assigned to you</Text>
             </View>
           </View>
-          <View style={styles.badgeViewOnly}>
-            <Text style={styles.badgeViewOnlyText}>DISPLAY ONLY</Text>
+          <View style={{ flexShrink: 0, marginLeft: 8 }}>
+            <View style={styles.badgeViewOnly}>
+              <Text style={styles.badgeViewOnlyText}>DISPLAY ONLY</Text>
+            </View>
           </View>
         </View>
 
@@ -205,13 +209,15 @@ export default function DashboardScreen({ navigation }) {
             <View style={[styles.iconBg, { backgroundColor: '#ECFDF5' }]}>
               <Ionicons name="navigate" size={26} color="#059669" />
             </View>
-            <View style={{ marginLeft: 14 }}>
+            <View style={{ marginLeft: 14, flex: 1, minWidth: 0 }}>
               <Text style={styles.cardTitle}>Start Recovery</Text>
               <Text style={styles.cardSub}>Select transport, record speedometer & track route</Text>
             </View>
           </View>
-          <View style={styles.actionIconBg}>
-            <Ionicons name="arrow-forward" size={20} color="#059669" />
+          <View style={{ flexShrink: 0 }}>
+            <View style={styles.actionIconBg}>
+              <Ionicons name="arrow-forward" size={20} color="#059669" />
+            </View>
           </View>
         </View>
       </TouchableOpacity>
@@ -229,13 +235,15 @@ export default function DashboardScreen({ navigation }) {
             <View style={[styles.iconBg, { backgroundColor: '#F5F3FF' }]}>
               <Ionicons name="person" size={26} color="#7C3AED" />
             </View>
-            <View style={{ marginLeft: 14 }}>
+            <View style={{ marginLeft: 14, flex: 1, minWidth: 0 }}>
               <Text style={styles.cardTitle}>Profile & History</Text>
               <Text style={styles.cardSub}>Agent identity, details & completed recovery history</Text>
             </View>
           </View>
-          <View style={[styles.actionIconBg, { backgroundColor: '#EDE9FE' }]}>
-            <Ionicons name="arrow-forward" size={20} color="#7C3AED" />
+          <View style={{ flexShrink: 0 }}>
+            <View style={[styles.actionIconBg, { backgroundColor: '#EDE9FE' }]}>
+              <Ionicons name="arrow-forward" size={20} color="#7C3AED" />
+            </View>
           </View>
         </View>
       </TouchableOpacity>
