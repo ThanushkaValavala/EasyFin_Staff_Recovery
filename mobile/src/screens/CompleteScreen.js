@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ScrollView,
   TextInput, Image, Alert, ActivityIndicator,
+  KeyboardAvoidingView, Platform,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
@@ -91,6 +92,8 @@ export default function CompleteScreen({ route, navigation }) {
   const startAddressRef = useRef('');
   const endAddressRef = useRef('');
   const done = useRef(false);
+  const scrollViewRef = useRef(null);
+  const remarksRef = useRef(null);
 
   useEffect(() => {
     describe(startLocation).then(setStartText);
@@ -306,10 +309,16 @@ export default function CompleteScreen({ route, navigation }) {
   const modeColor = rawMode === 'BIKE' || rawMode === 'CAR' ? '#7C3AED' : rawMode === 'OTHER' ? '#0284C7' : '#059669';
 
   return (
+    <KeyboardAvoidingView
+      style={styles.keyboardAvoid}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+    >
     <ScrollView
+      ref={scrollViewRef}
       style={styles.container}
-      contentContainerStyle={{ padding: 20, paddingBottom: 60 }}
+      contentContainerStyle={{ padding: 20, paddingBottom: 120 }}
       keyboardShouldPersistTaps="handled"
+      keyboardDismissMode="on-drag"
     >
       {/* ── HEADER ─────────────────────────────────────────────────────── */}
       <View style={styles.header}>
@@ -410,6 +419,7 @@ export default function CompleteScreen({ route, navigation }) {
 
         {/* Remarks box */}
         <TextInput
+          ref={remarksRef}
           style={styles.textArea}
           placeholder="Enter customer visit remarks here..."
           placeholderTextColor="#94A3B8"
@@ -418,6 +428,19 @@ export default function CompleteScreen({ route, navigation }) {
           value={remarks}
           onChangeText={setRemarks}
           textAlignVertical="top"
+          onFocus={() => {
+            setTimeout(() => {
+              remarksRef.current?.measureLayout(
+                scrollViewRef.current?.getInnerViewNode?.() ?? scrollViewRef.current,
+                (_x, y) => {
+                  scrollViewRef.current?.scrollTo({ y: y - 20, animated: true });
+                },
+                () => {
+                  scrollViewRef.current?.scrollToEnd({ animated: true });
+                }
+              );
+            }, 150);
+          }}
         />
         <Text style={styles.charCount}>{remarks.trim().length} characters</Text>
       </View>
@@ -451,10 +474,12 @@ export default function CompleteScreen({ route, navigation }) {
         ) : null}
       </View>
     </ScrollView>
+    </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
+  keyboardAvoid: { flex: 1, backgroundColor: '#F8FAFC' },
   container: { flex: 1, backgroundColor: '#F8FAFC' },
   header: { marginBottom: 18 },
   title: { fontSize: 22, fontWeight: '800', color: '#0F172A', letterSpacing: -0.3 },
