@@ -65,6 +65,7 @@ const REFUSAL_PATTERNS = [
   /\brefus(e|ed|ing|al)?\b/i,
   /\bwon'?t\s+pay\b/i,
   /\bno\s+money\b/i,
+  /\bno\s+cash\b/i,
   /\bnot\s+willing\b/i,
   /\bdenied\b/i,
   /\bangry\b/i,
@@ -87,8 +88,12 @@ const PROMISED_PATTERNS = [
   /\btomorrow\b/i,
   /\bnext\s+week\b/i,
   /\bnext\s+month\b/i,
-  /\bin\s+\d+\s+days?\b/i,
-  /\bafter\s+\d+\s+days?\b/i,
+  /\bin\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+days?\b/i,
+  /\bafter\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+days?\b/i,
+  /\bin\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+weeks?\b/i,
+  /\bafter\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+weeks?\b/i,
+  /\bin\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+months?\b/i,
+  /\bafter\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+months?\b/i,
   /\bdeferred\b/i,
   /\bdefer\b/i,
   /\badditional\s+time\b/i,
@@ -117,6 +122,11 @@ const UNAVAILABLE_PATTERNS = [
   /\bno\s+one\s+(was\s+)?home\b/i,
   /\bno\s+one\s+at\s+home\b/i,
   /\bhouse\s+locked\b/i,
+  /\bphone\s+(switched|turned)\s+off\b/i,
+  /\bnot\s+reachable\b/i,
+  /\bnot\s+answering\b/i,
+  /\bshifted\s+house\b/i,
+  /\baddress\s+not\s+known\b/i,
 ];
 
 function matchesAny(text, patterns) {
@@ -176,6 +186,9 @@ const NON_NAME_WORDS = new Set([
   'month', 'days', 'day', 'time', 'rs', 'amount',
   'refused', 'refuse', 'waited', 'wait', 'call', 'pay', 'right', 'now',
   'cash', 'just', 'give', 'take', 'left', 'right', 'very', 'much',
+  // additional common non-name words
+  'shifted', 'address', 'phone', 'wife', 'husband', 'new', 'known',
+  'went', 'twice', 'switched', 'off', 'reachable', 'answering',
 ]);
 
 const STOP_WORDS = new Set([
@@ -265,17 +278,37 @@ export function extractDetails(text) {
   const dateSet = new Set();
   function addDate(d) { if (!dateSet.has(d)) { dateSet.add(d); dates.push(d); } }
 
+  // Word-to-digit map for "one" through "ten"
+  const WORD_NUMS = {
+    one: 1, two: 2, three: 3, four: 4, five: 5,
+    six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+  };
+  // Normalise word numbers to digits so "after two weeks" → "after 2 weeks"
+  function normaliseWordNums(s) {
+    return s.replace(/\b(one|two|three|four|five|six|seven|eight|nine|ten)\b/gi,
+      (m) => WORD_NUMS[m.toLowerCase()]);
+  }
+  const tNorm = normaliseWordNums(t);
+
   if (/\btoday\b/i.test(t)) addDate('today');
   if (/\btomorrow\b/i.test(t)) addDate('tomorrow');
   if (/\bnext\s+week\b/i.test(t)) addDate('next week');
   if (/\bnext\s+month\b/i.test(t)) addDate('next month');
   if (/\bend\s+of\s+month\b/i.test(t)) addDate('end of month');
 
-  const inDays = t.match(/\bin\s+(\d+)\s+days?\b/i);
+  const inDays = tNorm.match(/\bin\s+(\d+)\s+days?\b/i);
   if (inDays) addDate(`in ${inDays[1]} days`);
-  const afterDays = t.match(/\bafter\s+(\d+)\s+days?\b/i);
+  const afterDays = tNorm.match(/\bafter\s+(\d+)\s+days?\b/i);
   if (afterDays) addDate(`after ${afterDays[1]} days`);
-  const nDays = t.match(/\b(\d+)\s+days?\b/i);
+  const inWeeks = tNorm.match(/\bin\s+(\d+)\s+weeks?\b/i);
+  if (inWeeks) addDate(`in ${inWeeks[1]} weeks`);
+  const afterWeeks = tNorm.match(/\bafter\s+(\d+)\s+weeks?\b/i);
+  if (afterWeeks) addDate(`after ${afterWeeks[1]} weeks`);
+  const inMonths = tNorm.match(/\bin\s+(\d+)\s+months?\b/i);
+  if (inMonths) addDate(`in ${inMonths[1]} months`);
+  const afterMonths = tNorm.match(/\bafter\s+(\d+)\s+months?\b/i);
+  if (afterMonths) addDate(`after ${afterMonths[1]} months`);
+  const nDays = tNorm.match(/\b(\d+)\s+days?\b/i);
   if (nDays && !inDays && !afterDays) addDate(`${nDays[1]} days`);
 
   // Weekday
@@ -322,7 +355,10 @@ export function extractDetails(text) {
   }
 
   // Single-word triggers
-  const singleTriggers = new Set(['met', 'meet', 'called', 'with', 'customer', 'mr', 'mrs', 'ms', 'shri', 'smt']);
+  // 'customer' is included so "customer Ramesh paid" extracts Ramesh; extractNameList
+  // already rejects NON_NAME_WORDS (shifted, not, said, paid, refused …) so
+  // "Customer shifted house" and "customer refused" produce no spurious names.
+  const singleTriggers = new Set(['met', 'meet', 'called', 'with', 'mr', 'mrs', 'ms', 'shri', 'smt', 'customer']);
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i].toLowerCase().replace(/[,.:;]$/, '');
     if (singleTriggers.has(tok)) {
@@ -394,7 +430,8 @@ function buildSummary(text, category, details) {
     outcome = 'money promised';
   } else if (category === 'REFUSED') {
     // Check for specific sub-reason
-    if (/no\s+money/i.test(text)) outcome = 'refused to pay - says no money';
+    if (/no\s+cash\b/i.test(text)) outcome = 'says no cash';
+    else if (/no\s+money/i.test(text)) outcome = 'refused to pay - says no money';
     else outcome = 'refused to pay';
   } else if (category === 'UNAVAILABLE') {
     outcome = 'not at home';
@@ -431,22 +468,35 @@ function buildSummary(text, category, details) {
   }
 
   if (category === 'PROMISED') {
-    let clause = 'money promised';
+    // Include amount when present: "Rs X promised [when]" or "money promised [when]"
+    let clause = amountStr ? `${amountStr} promised` : 'money promised';
     if (whenStr) clause += ` ${whenStr}`;
     let sentence = '';
     if (who) sentence = `${who} - ${clause}`;
-    else sentence = `Payment promised${whenStr ? ' ' + whenStr : ''}`;
+    else sentence = `Payment promised${amountStr ? ' ' + amountStr : ''}${whenStr ? ' ' + whenStr : ''}`;
     if (phones.length > 0) sentence += `. Phone: ${phones[0]}`;
     return truncate(sentence + '.');
   }
 
   if (category === 'REFUSED') {
+    // "no cash" gets a specific short summary
+    if (/no\s+cash\b/i.test(text)) {
+      if (who) return truncate(`${who} - says no cash.`);
+      return truncate('Customer says no cash.');
+    }
     let clause = outcome;
     if (who) return truncate(`${who} - ${clause}.`);
     return truncate(`Customer ${clause}.`);
   }
 
   if (category === 'UNAVAILABLE') {
+    // Specific short summaries for each unavailable sub-reason
+    if (/\bphone\s+(switched|turned)\s+off\b/i.test(text)) return truncate('Phone switched off.');
+    if (/\bnot\s+reachable\b/i.test(text)) return truncate('Customer not reachable.');
+    if (/\bnot\s+answering\b/i.test(text)) return truncate('Customer not answering.');
+    if (/\bshifted\s+house\b/i.test(text) || /\baddress\s+not\s+known\b/i.test(text)) {
+      return truncate('Customer shifted - address not known.');
+    }
     if (who) return truncate(`${who} - not at home.`);
     return truncate('Customer not at home.');
   }

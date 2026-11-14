@@ -60,7 +60,7 @@ function NlpBadge({ category, summary }) {
   return (
     <View style={[styles.badge, { backgroundColor: colors.bg, borderColor: colors.border }]}>
       <Text style={[styles.badgeText, { color: colors.text }]}>
-        {summary || 'Customer Contacted - General Follow-up'}
+        {summary || ''}
       </Text>
     </View>
   );
@@ -84,7 +84,7 @@ function SessionCard({ session }) {
     : 'Walk';
 
   const nlpCategory = session.nlpCategory || 'GENERAL';
-  const nlpSummary = session.nlpSummary || 'Customer Contacted - General Follow-up';
+  const nlpSummary = session.nlpSummary || '';
   const isPending = session._syncStatus === 'PENDING';
 
   const startLoc = session.startLocation ? `${session.startLocation.latitude?.toFixed(4)}, ${session.startLocation.longitude?.toFixed(4)}` : null;
