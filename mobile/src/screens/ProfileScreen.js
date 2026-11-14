@@ -66,14 +66,20 @@ function NlpBadge({ category, summary }) {
   );
 }
 
-function InfoRow({ icon, label, value }) {
+function InfoRow({ icon, label, value, wrapValue }) {
   return (
-    <View style={styles.infoRow}>
-      <View style={styles.infoLabelGroup}>
+    <View style={[styles.infoRow, wrapValue && styles.infoRowWrap]}>
+      <View style={[styles.infoLabelGroup, wrapValue && { flexShrink: 0 }]}>
         <Ionicons name={icon} size={14} color="#64748B" style={{ marginRight: 6 }} />
         <Text style={styles.infoLabel}>{label}:</Text>
       </View>
-      <Text style={styles.infoValue} numberOfLines={1}>{value || '-'}</Text>
+      {wrapValue ? (
+        <View style={styles.infoValueWrapContainer}>
+          <Text style={styles.infoValueWrap} numberOfLines={2} ellipsizeMode="tail">{value || '-'}</Text>
+        </View>
+      ) : (
+        <Text style={styles.infoValue} numberOfLines={1}>{value || '-'}</Text>
+      )}
     </View>
   );
 }
@@ -190,10 +196,10 @@ function SessionCard({ session }) {
           <InfoRow icon="car-outline" label="Vehicle Reg" value={session.vehicleNumber} />
         ) : null}
         {displayStart ? (
-          <InfoRow icon="location-outline" label="Start Loc" value={displayStart} />
+          <InfoRow icon="location-outline" label="Start Loc" value={displayStart} wrapValue />
         ) : null}
         {displayEnd ? (
-          <InfoRow icon="flag-outline" label="End Loc" value={displayEnd} />
+          <InfoRow icon="flag-outline" label="End Loc" value={displayEnd} wrapValue />
         ) : null}
       </View>
     </View>
@@ -494,6 +500,7 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: '#E2E8F0', marginBottom: 12,
     shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.03, shadowRadius: 4, elevation: 1,
+    overflow: 'hidden',
   },
   sessionCardPending: { borderLeftWidth: 4, borderLeftColor: '#F59E0B' },
   pendingBanner: {
@@ -519,9 +526,12 @@ const styles = StyleSheet.create({
   badgeText: { fontSize: 12, fontWeight: '700' },
   sessionInfoGrid: { gap: 4 },
   infoRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  infoRowWrap: { alignItems: 'flex-start' },
   infoLabelGroup: { flexDirection: 'row', alignItems: 'center' },
   infoLabel: { fontSize: 12, color: '#64748B', fontWeight: '500' },
   infoValue: { fontSize: 12, fontWeight: '600', color: '#0F172A' },
+  infoValueWrapContainer: { flex: 1, minWidth: 0, alignItems: 'flex-end', marginLeft: 8 },
+  infoValueWrap: { fontSize: 12, fontWeight: '600', color: '#0F172A', textAlign: 'right' },
   emptyCard: {
     backgroundColor: '#FFFFFF', borderRadius: 14, padding: 30,
     alignItems: 'center', borderWidth: 1, borderColor: '#E2E8F0',
