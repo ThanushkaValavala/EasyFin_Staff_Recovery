@@ -51,6 +51,7 @@ const recoverySessionSchema = new mongoose.Schema(
       enum: ['PAID', 'PROMISED', 'UNAVAILABLE', 'REFUSED', 'GENERAL', ''],
       default: '',
     },
+    nlpDetails: { type: mongoose.Schema.Types.Mixed, default: {} },
     vehicleType: { type: String, default: '' },
     vehicleNumber: { type: String, default: '' },
     deviceSessionId: { type: String, default: '' },

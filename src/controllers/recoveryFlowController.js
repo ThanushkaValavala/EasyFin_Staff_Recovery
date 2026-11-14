@@ -260,7 +260,13 @@ exports.finishSession = async (req, res) => {
       evidence = await saveImage({ file: req.file, sessionId, staffId, agentId, kind: 'END_SPEEDOMETER', location: endLocation, models: req.models });
     }
 
-    const { nlpSummary, nlpCategory } = summarize(remarks);
+    let nlpSummary, nlpCategory, nlpDetails;
+    try {
+      ({ nlpSummary, nlpCategory, nlpDetails } = summarize(remarks));
+    } catch (_e) {
+      nlpSummary = ''; nlpCategory = 'GENERAL';
+      nlpDetails = { names: [], amounts: [], dates: [], phones: [], keyPoints: [] };
+    }
 
     const endTime = new Date();
     session.endTime = endTime;
@@ -270,6 +276,7 @@ exports.finishSession = async (req, res) => {
     session.visitNotes = remarks;
     session.nlpSummary = nlpSummary;
     session.nlpCategory = nlpCategory;
+    session.nlpDetails = nlpDetails;
     if (evidence) session.endSpeedometerEvidenceId = evidence.evidenceId;
     session.durationSeconds = Number(req.body.durationSeconds) ||
       Math.round((endTime.getTime() - new Date(session.startTime).getTime()) / 1000);
@@ -344,7 +351,13 @@ exports.finishSessionWalk = async (req, res) => {
     if (!remarks) return fail(res, 400, 'Remarks are required.');
 
     const endLocation = parseJson(req.body.endLocation, null);
-    const { nlpSummary, nlpCategory } = summarize(remarks);
+    let nlpSummary, nlpCategory, nlpDetails;
+    try {
+      ({ nlpSummary, nlpCategory, nlpDetails } = summarize(remarks));
+    } catch (_e) {
+      nlpSummary = ''; nlpCategory = 'GENERAL';
+      nlpDetails = { names: [], amounts: [], dates: [], phones: [], keyPoints: [] };
+    }
 
     const endTime = new Date();
     session.endTime = endTime;
@@ -354,6 +367,7 @@ exports.finishSessionWalk = async (req, res) => {
     session.visitNotes = remarks;
     session.nlpSummary = nlpSummary;
     session.nlpCategory = nlpCategory;
+    session.nlpDetails = nlpDetails;
     session.durationSeconds = Number(req.body.durationSeconds) ||
       Math.round((endTime.getTime() - new Date(session.startTime).getTime()) / 1000);
     if (req.body.distanceMeters !== undefined) {
@@ -473,7 +487,13 @@ exports.syncOfflineSession = async (req, res) => {
       const remarks = String(body.remarks || body.rawRemarks || existing.remarks || '').trim();
       if (!remarks) return fail(res, 400, 'Customer visit remarks are required.');
 
-      const { nlpSummary, nlpCategory } = summarize(remarks);
+      let nlpSummary, nlpCategory, nlpDetails;
+      try {
+        ({ nlpSummary, nlpCategory, nlpDetails } = summarize(remarks));
+      } catch (_e) {
+        nlpSummary = ''; nlpCategory = 'GENERAL';
+        nlpDetails = { names: [], amounts: [], dates: [], phones: [], keyPoints: [] };
+      }
       existing.endTime = body.endTime ? new Date(body.endTime) : new Date();
       existing.status = 'COMPLETED';
       existing.remarks = remarks;
@@ -481,6 +501,7 @@ exports.syncOfflineSession = async (req, res) => {
       existing.visitNotes = remarks;
       existing.nlpSummary = nlpSummary;
       existing.nlpCategory = nlpCategory;
+      existing.nlpDetails = nlpDetails;
       if (body.durationSeconds !== undefined) existing.durationSeconds = Number(body.durationSeconds) || 0;
       if (body.distanceMeters !== undefined) existing.distanceMeters = Number(body.distanceMeters) || 0;
       if (body.movingSeconds !== undefined && body.movingSeconds !== null && body.movingSeconds !== '') {
@@ -589,7 +610,13 @@ exports.syncOfflineSession = async (req, res) => {
       });
     }
 
-    const { nlpSummary, nlpCategory } = summarize(remarks);
+    let nlpSummary, nlpCategory, nlpDetails;
+    try {
+      ({ nlpSummary, nlpCategory, nlpDetails } = summarize(remarks));
+    } catch (_e) {
+      nlpSummary = ''; nlpCategory = 'GENERAL';
+      nlpDetails = { names: [], amounts: [], dates: [], phones: [], keyPoints: [] };
+    }
 
     let assignmentId = body.assignmentId;
     let customerId = body.customerId;
@@ -634,6 +661,7 @@ exports.syncOfflineSession = async (req, res) => {
       visitNotes: remarks,
       nlpSummary,
       nlpCategory,
+      nlpDetails,
       startSpeedometerEvidenceId: startEvidence ? startEvidence.evidenceId : '',
       endSpeedometerEvidenceId: endEvidence ? endEvidence.evidenceId : '',
       startLocation: rules.pickLocation(startLoc),
