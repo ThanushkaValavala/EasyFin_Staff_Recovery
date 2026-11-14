@@ -61,14 +61,6 @@ async function getReadableAddress(p) {
   return '';
 }
 
-const REMARK_SUGGESTIONS = [
-  'Customer was not available during the visit.',
-  'I met the customer. Payment will be made next week.',
-  'Customer paid the outstanding loan amount.',
-  'Customer refused to make the payment.',
-  'Customer requested additional time for payment.',
-];
-
 export default function CompleteScreen({ route, navigation }) {
   const {
     session,
@@ -96,7 +88,6 @@ export default function CompleteScreen({ route, navigation }) {
   const [submitting, setSubmitting] = useState(false);
   const [startText, setStartText] = useState('Locating...');
   const [endText, setEndText] = useState('Locating...');
-  const [showSuggestions, setShowSuggestions] = useState(false);
   const startAddressRef = useRef('');
   const endAddressRef = useRef('');
   const done = useRef(false);
@@ -196,6 +187,11 @@ export default function CompleteScreen({ route, navigation }) {
     try {
       if (!needsEndPhoto) {
         // WALK / OTHER: JSON finish endpoint
+        let nlpDetailsStr = '';
+        try {
+          const { nlpDetails } = summarize(remarks.trim());
+          nlpDetailsStr = JSON.stringify(nlpDetails || {});
+        } catch (_e) {}
         await apiPost(`/recovery/sessions/${sessionId}/finish-walk`, {
           remarks: remarks.trim(),
           distanceMeters: Math.round(dist || 0),
@@ -210,9 +206,15 @@ export default function CompleteScreen({ route, navigation }) {
             longitude: end.longitude || 0,
             accuracy: end.accuracy || 0,
           },
+          nlpDetails: nlpDetailsStr,
         });
       } else {
         // BIKE / CAR: multipart with ending speedometer
+        let nlpDetailsStr = '';
+        try {
+          const { nlpDetails } = summarize(remarks.trim());
+          nlpDetailsStr = JSON.stringify(nlpDetails || {});
+        } catch (_e) {}
         await apiUploadFile(
           `/recovery/sessions/${sessionId}/finish`,
           {
@@ -229,6 +231,7 @@ export default function CompleteScreen({ route, navigation }) {
               longitude: end.longitude || 0,
               accuracy: end.accuracy || 0,
             }),
+            nlpDetails: nlpDetailsStr,
           },
           'endPhoto',
           photo
@@ -245,7 +248,9 @@ export default function CompleteScreen({ route, navigation }) {
       if (isNetworkError(e)) {
         // Save offline, sync later
         try {
-          const { nlpSummary, nlpCategory } = summarize(remarks.trim());
+          const { nlpSummary, nlpCategory, nlpDetails } = summarize(remarks.trim());
+          let nlpDetailsStr = '';
+          try { nlpDetailsStr = JSON.stringify(nlpDetails || {}); } catch (_e) {}
           await savePendingSession({
             deviceSessionId: session?.deviceSessionId || sessionId,
             sessionId: session?.sessionId || sessionId,
@@ -271,6 +276,7 @@ export default function CompleteScreen({ route, navigation }) {
             rawRemarks: remarks.trim(),
             nlpSummary,
             nlpCategory,
+            nlpDetails: nlpDetailsStr,
             startLocation: startLocation || session?.startLocation || null,
             endLocation: end || null,
             startPhotoUri: startPhotoUri || session?.startPhotoUri || null,
@@ -402,34 +408,7 @@ export default function CompleteScreen({ route, navigation }) {
           Describe what happened during this visit. This will be processed by NLP to generate a recovery category.
         </Text>
 
-        {/* Suggestion chips */}
-        <TouchableOpacity
-          style={styles.suggestionToggle}
-          onPress={() => setShowSuggestions(!showSuggestions)}
-        >
-          <Ionicons name="bulb-outline" size={14} color="#2563EB" style={{ marginRight: 5 }} />
-          <Text style={styles.suggestionToggleText}>
-            {showSuggestions ? 'Hide suggestions' : 'Show example remarks'}
-          </Text>
-        </TouchableOpacity>
-
-        {showSuggestions ? (
-          <View style={styles.suggestionsBox}>
-            {REMARK_SUGGESTIONS.map((s, i) => (
-              <TouchableOpacity
-                key={i}
-                style={styles.suggestionChip}
-                onPress={() => {
-                  setRemarks(s);
-                  setShowSuggestions(false);
-                }}
-              >
-                <Text style={styles.suggestionChipText}>{s}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        ) : null}
-
+        {/* Remarks box */}
         <TextInput
           style={styles.textArea}
           placeholder="Enter customer visit remarks here..."
@@ -544,17 +523,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#EFF6FF', borderRadius: 8, borderWidth: 1, borderColor: '#BFDBFE',
   },
   retakeBtnText: { color: '#2563EB', fontSize: 13, fontWeight: '700' },
-
-  suggestionToggle: {
-    flexDirection: 'row', alignItems: 'center', marginBottom: 8,
-  },
-  suggestionToggleText: { fontSize: 12, color: '#2563EB', fontWeight: '600' },
-  suggestionsBox: { marginBottom: 10, gap: 6 },
-  suggestionChip: {
-    backgroundColor: '#F1F5F9', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 8,
-    borderWidth: 1, borderColor: '#E2E8F0',
-  },
-  suggestionChipText: { fontSize: 12, color: '#334155', fontWeight: '500' },
 
   textArea: {
     backgroundColor: '#FFFFFF', borderWidth: 1.5, borderColor: '#E2E8F0',

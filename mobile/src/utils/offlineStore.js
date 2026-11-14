@@ -175,6 +175,7 @@ export async function syncPendingSessions() {
                   longitude: endLoc.longitude || 0,
                   accuracy: endLoc.accuracy || 0,
                 }),
+                nlpDetails: session.nlpDetails || '',
               },
               'endPhoto',
               session.endPhotoUri
@@ -227,6 +228,7 @@ export async function syncPendingSessions() {
               startLocation: JSON.stringify(session.startLocation || null),
               endLocation: JSON.stringify(session.endLocation || null),
               points: JSON.stringify(session.points || []),
+              nlpDetails: session.nlpDetails || '',
             },
             {
               startPhoto: session.startPhotoUri,
