@@ -221,9 +221,17 @@ export default function LoginScreen({ navigation }) {
                 placeholderTextColor="#94A3B8"
                 keyboardType="phone-pad"
                 autoCorrect={false}
-                maxLength={15}
+                maxLength={14}
                 value={phone}
-                onChangeText={setPhone}
+                onChangeText={(text) => {
+                  let digits = text.replace(/\D/g, '');
+                  if (digits.length === 12 && digits.startsWith('91')) {
+                    digits = digits.slice(2);
+                  } else if (digits.length === 11 && digits.startsWith('0')) {
+                    digits = digits.slice(1);
+                  }
+                  setPhone(digits.slice(0, 10));
+                }}
                 onSubmitEditing={requestOtp}
               />
             </View>
@@ -237,10 +245,10 @@ export default function LoginScreen({ navigation }) {
             <TouchableOpacity
               style={[
                 styles.primaryBtn,
-                (loading || !branch || phone.trim().length < 7) && styles.btnDisabled,
+                (loading || !branch || phone.length !== 10) && styles.btnDisabled,
               ]}
               onPress={requestOtp}
-              disabled={loading || !branch || phone.trim().length < 7}
+              disabled={loading || !branch || phone.length !== 10}
             >
               {loading ? (
                 <ActivityIndicator color="#fff" />
