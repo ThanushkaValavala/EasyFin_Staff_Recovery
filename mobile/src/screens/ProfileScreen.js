@@ -183,8 +183,28 @@ function SessionCard({ session }) {
         </View>
       </View>
 
-      {/* NLP Summary Badge */}
-      <NlpBadge category={nlpCategory} summary={nlpSummary} />
+      {/* Customer-met block (new recoveries) or NLP badge (old recoveries) */}
+      {session.customerMet === true ? (
+        <View style={styles.customerMetBlock}>
+          <Text style={styles.customerMetTitle}>✔ Met the customer</Text>
+          {Array.isArray(session.customerNames) && session.customerNames.length > 0 ? (
+            <Text style={styles.customerMetDetail}>Names: {session.customerNames.join(', ')}</Text>
+          ) : null}
+          {session.metAt ? (
+            <Text style={styles.customerMetDetail}>Met at: {fmtTime(session.metAt)}</Text>
+          ) : null}
+        </View>
+      ) : session.customerMet === false ? (
+        <View style={styles.customerNotMetBlock}>
+          <Text style={styles.customerNotMetTitle}>✖ Not met the customer</Text>
+          {session.notMetReason ? (
+            <Text style={styles.customerNotMetDetail}>Reason: {session.notMetReason}</Text>
+          ) : null}
+        </View>
+      ) : (
+        /* customerMet is undefined — old recovery, show existing NLP badge */
+        <NlpBadge category={nlpCategory} summary={nlpSummary} />
+      )}
 
       <View style={styles.sessionInfoGrid}>
         <InfoRow icon="time-outline" label="Start Time" value={fmtTime(session.startTime)} />
@@ -547,4 +567,19 @@ const styles = StyleSheet.create({
   },
   recoveriesPerDayLeft: { flexDirection: 'row', alignItems: 'center' },
   recoveriesPerDayTitle: { fontSize: 14, fontWeight: '700', color: '#0F172A' },
+
+  // Customer-met / not-met blocks in SessionCard
+  customerMetBlock: {
+    backgroundColor: '#F0FDF4', borderRadius: 8, padding: 10,
+    borderWidth: 1, borderColor: '#BBF7D0', marginBottom: 12,
+  },
+  customerMetTitle: { fontSize: 13, fontWeight: '800', color: '#15803D', marginBottom: 4 },
+  customerMetDetail: { fontSize: 12, fontWeight: '500', color: '#166534', marginTop: 2 },
+
+  customerNotMetBlock: {
+    backgroundColor: '#FEF2F2', borderRadius: 8, padding: 10,
+    borderWidth: 1, borderColor: '#FCA5A5', marginBottom: 12,
+  },
+  customerNotMetTitle: { fontSize: 13, fontWeight: '800', color: '#DC2626', marginBottom: 4 },
+  customerNotMetDetail: { fontSize: 12, fontWeight: '500', color: '#991B1B', marginTop: 2 },
 });

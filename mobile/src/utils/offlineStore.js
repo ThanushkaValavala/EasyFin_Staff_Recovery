@@ -159,10 +159,8 @@ export async function syncPendingSessions() {
           if (hasBackendSession && session.endPhotoUri) {
             console.log('[offlineStore] Syncing online-started Bike/Car session with end photo:', session.sessionId);
             const endLoc = session.endLocation || {};
-            await apiUploadFile(
-              `/recovery/sessions/${session.sessionId}/finish`,
-              {
-                remarks: session.remarks || session.rawRemarks || '',
+            const onlineFinishMeta = (() => {
+              const base = {
                 distanceMeters: String(Math.round(session.distanceMeters || 0)),
                 durationSeconds: String(Math.round(session.durationSeconds || 0)),
                 movingSeconds: session.movingSeconds != null ? String(Math.round(session.movingSeconds)) : '',
@@ -175,8 +173,20 @@ export async function syncPendingSessions() {
                   longitude: endLoc.longitude || 0,
                   accuracy: endLoc.accuracy || 0,
                 }),
-                nlpDetails: session.nlpDetails || '',
-              },
+              };
+              if (session.customerMet === true) {
+                base.customerMet = 'true';
+                base.customerNames = JSON.stringify(Array.isArray(session.customerNames) ? session.customerNames : []);
+                if (session.metAt) base.metAt = session.metAt;
+              } else if (session.customerMet === false) {
+                base.customerMet = 'false';
+                if (session.notMetReason) base.notMetReason = session.notMetReason;
+              }
+              return base;
+            })();
+            await apiUploadFile(
+              `/recovery/sessions/${session.sessionId}/finish`,
+              onlineFinishMeta,
               'endPhoto',
               session.endPhotoUri
             );
@@ -208,9 +218,8 @@ export async function syncPendingSessions() {
           }
 
           console.log('[offlineStore] Syncing full offline Bike/Car recovery with both photos:', session.deviceSessionId);
-          await apiUploadFiles(
-            '/recovery/sync',
-            {
+          const bikeCarSyncMeta = (() => {
+            const base = {
               deviceSessionId: session.deviceSessionId,
               sessionId: session.sessionId,
               vehicleType: mode,
@@ -224,12 +233,23 @@ export async function syncPendingSessions() {
               unknownSeconds: session.unknownSeconds != null ? String(Math.round(session.unknownSeconds)) : '',
               startAddress,
               endAddress,
-              remarks: session.remarks || session.rawRemarks || '',
               startLocation: JSON.stringify(session.startLocation || null),
               endLocation: JSON.stringify(session.endLocation || null),
               points: JSON.stringify(session.points || []),
-              nlpDetails: session.nlpDetails || '',
-            },
+            };
+            if (session.customerMet === true) {
+              base.customerMet = 'true';
+              base.customerNames = JSON.stringify(Array.isArray(session.customerNames) ? session.customerNames : []);
+              if (session.metAt) base.metAt = session.metAt;
+            } else if (session.customerMet === false) {
+              base.customerMet = 'false';
+              if (session.notMetReason) base.notMetReason = session.notMetReason;
+            }
+            return base;
+          })();
+          await apiUploadFiles(
+            '/recovery/sync',
+            bikeCarSyncMeta,
             {
               startPhoto: session.startPhotoUri,
               endPhoto: session.endPhotoUri,
@@ -241,7 +261,7 @@ export async function syncPendingSessions() {
         } else {
           // WALK or OTHER: sync without photos
           console.log(`[offlineStore] Syncing ${mode} session (no photo required):`, session.deviceSessionId);
-          await apiPost('/recovery/sync', {
+          const walkSyncPayload = {
             ...session,
             vehicleType: mode,
             movingSeconds: session.movingSeconds != null ? Math.round(session.movingSeconds) : null,
@@ -250,7 +270,17 @@ export async function syncPendingSessions() {
             startAddress,
             endAddress,
             points: session.points || [],
-          });
+          };
+          // Always forward customer-met fields if present (undefined fields are ignored by JSON.stringify)
+          if (session.customerMet === true) {
+            walkSyncPayload.customerMet = true;
+            walkSyncPayload.customerNames = Array.isArray(session.customerNames) ? session.customerNames : [];
+            if (session.metAt) walkSyncPayload.metAt = session.metAt;
+          } else if (session.customerMet === false) {
+            walkSyncPayload.customerMet = false;
+            if (session.notMetReason) walkSyncPayload.notMetReason = session.notMetReason;
+          }
+          await apiPost('/recovery/sync', walkSyncPayload);
 
           console.log(`[offlineStore] Confirmed sync for ${mode} session:`, session.deviceSessionId);
           synced++;

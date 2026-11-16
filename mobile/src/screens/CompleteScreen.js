@@ -9,7 +9,6 @@ import * as Location from 'expo-location';
 import { Ionicons } from '@expo/vector-icons';
 import { apiUploadFile, apiPost } from '../api';
 import { formatDistance, formatDuration } from '../utils/geo';
-import { summarize } from '../utils/nlpSummarizer';
 import { savePendingSession } from '../utils/offlineStore';
 
 function isNetworkError(e) {
@@ -85,7 +84,6 @@ export default function CompleteScreen({ route, navigation }) {
   const needsEndPhoto = rawMode === 'BIKE' || rawMode === 'CAR';
 
   const [photo, setPhoto] = useState(null);
-  const [remarks, setRemarks] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [startText, setStartText] = useState('Locating...');
   const [endText, setEndText] = useState('Locating...');
@@ -94,6 +92,14 @@ export default function CompleteScreen({ route, navigation }) {
   const done = useRef(false);
   const scrollViewRef = useRef(null);
   const remarksRef = useRef(null);
+
+  // ── Customer-met state ───────────────────────────────────────────────────────
+  // null = not chosen, true = met, false = not met
+  const [customerMet, setCustomerMet] = useState(null);
+  const [customerNames, setCustomerNames] = useState(['']);
+  const [notMetReason, setNotMetReason] = useState('');
+  // Record the first moment the agent picks "Met"
+  const metAtRef = useRef(null);
 
   useEffect(() => {
     describe(startLocation).then(setStartText);
@@ -114,8 +120,8 @@ export default function CompleteScreen({ route, navigation }) {
         Alert.alert(
           'Complete Recovery Session',
           needsEndPhoto
-            ? 'Please capture the ending speedometer photo and enter customer remarks to finish.'
-            : 'Please enter customer visit remarks to finish this recovery.'
+            ? 'Please capture the ending speedometer photo and answer the customer meeting question to finish.'
+            : 'Please answer the customer meeting question to finish this recovery.'
         );
       }),
     [navigation, needsEndPhoto]
@@ -137,12 +143,35 @@ export default function CompleteScreen({ route, navigation }) {
     }
   };
 
-  // Validation:
-  // ALL modes: Remarks mandatory
-  // BIKE/CAR: Ending speedometer photo mandatory
-  // WALK/OTHER: No photo needed
+  // ── Customer-met helpers ─────────────────────────────────────────────────────
+  const handleSelectMet = (met) => {
+    if (met) {
+      // Record metAt only on first selection; update if switching back
+      metAtRef.current = new Date().toISOString();
+    }
+    setCustomerMet(met);
+  };
+
+  const handleNameChange = (text, idx) => {
+    if (text.length > 60) return;
+    const updated = [...customerNames];
+    updated[idx] = text;
+    setCustomerNames(updated);
+  };
+
+  const handleAddName = () => {
+    if (customerNames.length < 5) {
+      setCustomerNames([...customerNames, '']);
+    }
+  };
+
+  const validNames = customerNames.map((n) => n.trim()).filter(Boolean);
+
+  // ── Validation ───────────────────────────────────────────────────────────────
   const canEndRecovery = (() => {
-    if (!remarks.trim()) return false;
+    if (customerMet === null) return false;
+    if (customerMet === true && validNames.length === 0) return false;
+    if (customerMet === false && !notMetReason.trim()) return false;
     if (needsEndPhoto && !photo) return false;
     if (submitting) return false;
     return true;
@@ -158,8 +187,16 @@ export default function CompleteScreen({ route, navigation }) {
   };
 
   const completeRecovery = async () => {
-    if (!remarks.trim()) {
-      Alert.alert('Remarks Required', 'Please enter customer visit remarks before submitting.');
+    if (customerMet === null) {
+      Alert.alert('Customer Meeting Required', 'Please indicate whether you met the customer.');
+      return;
+    }
+    if (customerMet === true && validNames.length === 0) {
+      Alert.alert('Customer Name Required', 'Please enter at least one customer name.');
+      return;
+    }
+    if (customerMet === false && !notMetReason.trim()) {
+      Alert.alert('Reason Required', 'Please enter a reason for not meeting the customer.');
       return;
     }
     if (needsEndPhoto && !photo) {
@@ -187,16 +224,22 @@ export default function CompleteScreen({ route, navigation }) {
     sAddr = sAddr || '';
     eAddr = eAddr || '';
 
+    // Build the customer-met fields to send
+    const customerMetFields = customerMet === true
+      ? {
+          customerMet: true,
+          customerNames: validNames,
+          metAt: metAtRef.current || new Date().toISOString(),
+        }
+      : {
+          customerMet: false,
+          notMetReason: notMetReason.trim(),
+        };
+
     try {
       if (!needsEndPhoto) {
         // WALK / OTHER: JSON finish endpoint
-        let nlpDetailsStr = '';
-        try {
-          const { nlpDetails } = summarize(remarks.trim());
-          nlpDetailsStr = JSON.stringify(nlpDetails || {});
-        } catch (_e) {}
         await apiPost(`/recovery/sessions/${sessionId}/finish-walk`, {
-          remarks: remarks.trim(),
           distanceMeters: Math.round(dist || 0),
           durationSeconds: Math.round(durationSeconds || 0),
           movingSeconds: movingSeconds != null ? Math.round(movingSeconds) : null,
@@ -209,19 +252,24 @@ export default function CompleteScreen({ route, navigation }) {
             longitude: end.longitude || 0,
             accuracy: end.accuracy || 0,
           },
-          nlpDetails: nlpDetailsStr,
+          ...customerMetFields,
         });
       } else {
         // BIKE / CAR: multipart with ending speedometer
-        let nlpDetailsStr = '';
-        try {
-          const { nlpDetails } = summarize(remarks.trim());
-          nlpDetailsStr = JSON.stringify(nlpDetails || {});
-        } catch (_e) {}
+        const metaFields = customerMet === true
+          ? {
+              customerMet: 'true',
+              customerNames: JSON.stringify(validNames),
+              metAt: metAtRef.current || new Date().toISOString(),
+            }
+          : {
+              customerMet: 'false',
+              notMetReason: notMetReason.trim(),
+            };
+
         await apiUploadFile(
           `/recovery/sessions/${sessionId}/finish`,
           {
-            remarks: remarks.trim(),
             distanceMeters: String(Math.round(dist || 0)),
             durationSeconds: String(Math.round(durationSeconds || 0)),
             movingSeconds: movingSeconds != null ? String(Math.round(movingSeconds)) : '',
@@ -234,7 +282,7 @@ export default function CompleteScreen({ route, navigation }) {
               longitude: end.longitude || 0,
               accuracy: end.accuracy || 0,
             }),
-            nlpDetails: nlpDetailsStr,
+            ...metaFields,
           },
           'endPhoto',
           photo
@@ -251,9 +299,6 @@ export default function CompleteScreen({ route, navigation }) {
       if (isNetworkError(e)) {
         // Save offline, sync later
         try {
-          const { nlpSummary, nlpCategory, nlpDetails } = summarize(remarks.trim());
-          let nlpDetailsStr = '';
-          try { nlpDetailsStr = JSON.stringify(nlpDetails || {}); } catch (_e) {}
           await savePendingSession({
             deviceSessionId: session?.deviceSessionId || sessionId,
             sessionId: session?.sessionId || sessionId,
@@ -275,16 +320,15 @@ export default function CompleteScreen({ route, navigation }) {
             unknownSeconds: unknownSeconds != null ? Math.round(unknownSeconds) : null,
             startAddress: sAddr,
             endAddress: eAddr,
-            remarks: remarks.trim(),
-            rawRemarks: remarks.trim(),
-            nlpSummary,
-            nlpCategory,
-            nlpDetails: nlpDetailsStr,
             startLocation: startLocation || session?.startLocation || null,
             endLocation: end || null,
             startPhotoUri: startPhotoUri || session?.startPhotoUri || null,
             endPhotoUri: needsEndPhoto ? (photo || null) : null,
             points: allPoints || [],
+            customerMet: customerMet,
+            customerNames: customerMet === true ? validNames : undefined,
+            metAt: customerMet === true ? (metAtRef.current || new Date().toISOString()) : undefined,
+            notMetReason: customerMet === false ? notMetReason.trim() : undefined,
             _syncStatus: 'PENDING',
           });
 
@@ -307,6 +351,15 @@ export default function CompleteScreen({ route, navigation }) {
 
   const modeIcon = rawMode === 'BIKE' ? 'bicycle-outline' : rawMode === 'CAR' ? 'car-outline' : rawMode === 'OTHER' ? 'bus-outline' : 'walk-outline';
   const modeColor = rawMode === 'BIKE' || rawMode === 'CAR' ? '#7C3AED' : rawMode === 'OTHER' ? '#0284C7' : '#059669';
+
+  // ── Validation note text ─────────────────────────────────────────────────────
+  const validationNoteText = (() => {
+    if (needsEndPhoto && !photo) return 'Capture ending speedometer photo to proceed';
+    if (customerMet === null) return 'Indicate whether you met the customer to proceed';
+    if (customerMet === true && validNames.length === 0) return 'Enter at least one customer name to proceed';
+    if (customerMet === false && !notMetReason.trim()) return 'Enter a reason for not meeting the customer to proceed';
+    return '';
+  })();
 
   return (
     <KeyboardAvoidingView
@@ -410,39 +463,104 @@ export default function CompleteScreen({ route, navigation }) {
         )}
       </View>
 
-      {/* ── CUSTOMER VISIT REMARKS ─────────────────────────────────────── */}
+      {/* ── DID YOU MEET THE CUSTOMER? ─────────────────────────────────── */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>2. Customer Visit Remarks *</Text>
-        <Text style={styles.helperText}>
-          Describe what happened during this visit. This will be processed by NLP to generate a recovery category.
-        </Text>
+        <Text style={styles.sectionTitle}>2. Did you meet the customer? *</Text>
 
-        {/* Remarks box */}
-        <TextInput
-          ref={remarksRef}
-          style={styles.textArea}
-          placeholder="Enter customer visit remarks here..."
-          placeholderTextColor="#94A3B8"
-          multiline
-          numberOfLines={5}
-          value={remarks}
-          onChangeText={setRemarks}
-          textAlignVertical="top"
-          onFocus={() => {
-            setTimeout(() => {
-              remarksRef.current?.measureLayout(
-                scrollViewRef.current?.getInnerViewNode?.() ?? scrollViewRef.current,
-                (_x, y) => {
-                  scrollViewRef.current?.scrollTo({ y: y - 20, animated: true });
-                },
-                () => {
-                  scrollViewRef.current?.scrollToEnd({ animated: true });
-                }
-              );
-            }, 150);
-          }}
-        />
-        <Text style={styles.charCount}>{remarks.trim().length} characters</Text>
+        {/* Two tappable options side by side */}
+        <View style={styles.metChoiceRow}>
+          <TouchableOpacity
+            style={[
+              styles.metChoiceBtn,
+              customerMet === true && styles.metChoiceBtnMetActive,
+            ]}
+            onPress={() => handleSelectMet(true)}
+            activeOpacity={0.8}
+          >
+            <Ionicons
+              name="checkmark-circle-outline"
+              size={18}
+              color={customerMet === true ? '#FFFFFF' : '#059669'}
+              style={{ marginRight: 6 }}
+            />
+            <Text
+              style={[
+                styles.metChoiceBtnText,
+                customerMet === true && styles.metChoiceBtnTextActive,
+              ]}
+            >
+              Met the customer
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[
+              styles.metChoiceBtn,
+              customerMet === false && styles.metChoiceBtnNotMetActive,
+            ]}
+            onPress={() => handleSelectMet(false)}
+            activeOpacity={0.8}
+          >
+            <Ionicons
+              name="close-circle-outline"
+              size={18}
+              color={customerMet === false ? '#FFFFFF' : '#DC2626'}
+              style={{ marginRight: 6 }}
+            />
+            <Text
+              style={[
+                styles.metChoiceBtnText,
+                customerMet === false && styles.metChoiceBtnTextActive,
+              ]}
+            >
+              Not met the customer
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Met → customer names */}
+        {customerMet === true && (
+          <View style={styles.metDetailBox}>
+            <Text style={styles.metDetailLabel}>Customer name(s) *</Text>
+            {customerNames.map((name, idx) => (
+              <TextInput
+                key={idx}
+                style={[styles.nameInput, idx > 0 && { marginTop: 8 }]}
+                placeholder={idx === 0 ? 'Enter customer name' : `Name ${idx + 1}`}
+                placeholderTextColor="#94A3B8"
+                value={name}
+                onChangeText={(t) => handleNameChange(t, idx)}
+                maxLength={60}
+                returnKeyType="done"
+              />
+            ))}
+            {customerNames.length < 5 && (
+              <TouchableOpacity style={styles.addNameBtn} onPress={handleAddName}>
+                <Ionicons name="add-circle-outline" size={16} color="#2563EB" style={{ marginRight: 4 }} />
+                <Text style={styles.addNameBtnText}>+ Add another name</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        )}
+
+        {/* Not met → reason */}
+        {customerMet === false && (
+          <View style={styles.metDetailBox}>
+            <Text style={styles.metDetailLabel}>Reason for not meeting *</Text>
+            <TextInput
+              style={styles.reasonInput}
+              placeholder="Enter reason for not meeting the customer..."
+              placeholderTextColor="#94A3B8"
+              multiline
+              numberOfLines={4}
+              value={notMetReason}
+              onChangeText={(t) => { if (t.length <= 300) setNotMetReason(t); }}
+              textAlignVertical="top"
+              maxLength={300}
+            />
+            <Text style={styles.charCount}>{notMetReason.length} / 300 characters</Text>
+          </View>
+        )}
       </View>
 
       {/* ── END RECOVERY BUTTON ──────────────────────────────────────────── */}
@@ -463,14 +581,8 @@ export default function CompleteScreen({ route, navigation }) {
           )}
         </TouchableOpacity>
 
-        {!canEndRecovery ? (
-          <Text style={styles.validationNote}>
-            {needsEndPhoto && !photo
-              ? 'Capture ending speedometer photo and enter remarks to proceed'
-              : !remarks.trim()
-              ? 'Enter customer visit remarks to proceed'
-              : ''}
-          </Text>
+        {!canEndRecovery && validationNoteText ? (
+          <Text style={styles.validationNote}>{validationNoteText}</Text>
         ) : null}
       </View>
     </ScrollView>
@@ -516,7 +628,6 @@ const styles = StyleSheet.create({
 
   section: { marginBottom: 18 },
   sectionTitle: { fontSize: 14, fontWeight: '700', color: '#1E293B', marginBottom: 10 },
-  helperText: { fontSize: 12, color: '#64748B', marginBottom: 10, fontWeight: '500', lineHeight: 17 },
 
   naCard: {
     flexDirection: 'row', alignItems: 'center',
@@ -549,10 +660,38 @@ const styles = StyleSheet.create({
   },
   retakeBtnText: { color: '#2563EB', fontSize: 13, fontWeight: '700' },
 
-  textArea: {
+  // Customer-met section
+  metChoiceRow: { flexDirection: 'row', gap: 10, marginBottom: 12 },
+  metChoiceBtn: {
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    paddingVertical: 12, paddingHorizontal: 8, borderRadius: 12,
+    borderWidth: 1.5, borderColor: '#E2E8F0', backgroundColor: '#FFFFFF',
+  },
+  metChoiceBtnMetActive: { backgroundColor: '#059669', borderColor: '#059669' },
+  metChoiceBtnNotMetActive: { backgroundColor: '#DC2626', borderColor: '#DC2626' },
+  metChoiceBtnText: { fontSize: 13, fontWeight: '700', color: '#334155' },
+  metChoiceBtnTextActive: { color: '#FFFFFF' },
+
+  metDetailBox: {
+    backgroundColor: '#F8FAFC', borderRadius: 12, padding: 14,
+    borderWidth: 1, borderColor: '#E2E8F0',
+  },
+  metDetailLabel: { fontSize: 13, fontWeight: '700', color: '#1E293B', marginBottom: 10 },
+
+  nameInput: {
     backgroundColor: '#FFFFFF', borderWidth: 1.5, borderColor: '#E2E8F0',
-    borderRadius: 12, padding: 14, fontSize: 14, color: '#0F172A',
-    minHeight: 110, fontWeight: '500',
+    borderRadius: 10, padding: 12, fontSize: 14, color: '#0F172A', fontWeight: '500',
+  },
+  addNameBtn: {
+    flexDirection: 'row', alignItems: 'center', marginTop: 10,
+    paddingVertical: 6, alignSelf: 'flex-start',
+  },
+  addNameBtnText: { fontSize: 13, fontWeight: '700', color: '#2563EB' },
+
+  reasonInput: {
+    backgroundColor: '#FFFFFF', borderWidth: 1.5, borderColor: '#E2E8F0',
+    borderRadius: 10, padding: 12, fontSize: 14, color: '#0F172A',
+    minHeight: 100, fontWeight: '500',
   },
   charCount: { fontSize: 11, color: '#94A3B8', textAlign: 'right', marginTop: 4 },
 
