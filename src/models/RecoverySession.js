@@ -63,7 +63,11 @@ const recoverySessionSchema = new mongoose.Schema(
     startAddress: { type: String, default: '' },
     endAddress: { type: String, default: '' },
     startLocation: { latitude: { type: Number }, longitude: { type: Number }, accuracy: { type: Number, default: 0 } },
-    endLocation: { latitude: { type: Number }, longitude: { type: Number }, accuracy: { type: Number, default: 0 } }
+    endLocation: { latitude: { type: Number }, longitude: { type: Number }, accuracy: { type: Number, default: 0 } },
+    customerMet: { type: Boolean, default: null },
+    customerNames: { type: [String], default: [] },
+    metAt: { type: Date, default: null },
+    notMetReason: { type: String, default: '' }
   },
   { timestamps: true }
 );

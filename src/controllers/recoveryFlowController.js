@@ -16,6 +16,51 @@ const parseJson = (v, fallback) => {
   try { return v ? JSON.parse(v) : fallback; } catch (e) { return fallback; }
 };
 
+/**
+ * Parse and validate the customerMet block from a request body.
+ * Returns { ok: true, customerMet, customerNames, metAt, notMetReason }
+ * or      { ok: false, status, message } on validation failure.
+ * Returns { ok: null } when customerMet is absent (older-app path).
+ */
+const parseCustomerMetBlock = (body) => {
+  const rawCm = body.customerMet;
+  if (rawCm === undefined || rawCm === null || rawCm === '') return { ok: null };
+
+  let customerMet;
+  if (rawCm === true  || rawCm === 'true')  customerMet = true;
+  else if (rawCm === false || rawCm === 'false') customerMet = false;
+  else return { ok: false, status: 400, message: 'customerMet must be true or false.' };
+
+  // customerNames: accept JSON string or array; trim; drop empties; cap at 5; each max 60 chars
+  let rawNames = parseJson(body.customerNames, body.customerNames);
+  if (!Array.isArray(rawNames)) rawNames = rawNames ? [String(rawNames)] : [];
+  const customerNames = rawNames
+    .map((n) => String(n).trim().slice(0, 60))
+    .filter((n) => n.length > 0)
+    .slice(0, 5);
+
+  // metAt: valid date only
+  let metAt = null;
+  if (body.metAt !== undefined && body.metAt !== null && body.metAt !== '') {
+    const d = new Date(body.metAt);
+    if (isNaN(d.getTime())) return { ok: false, status: 400, message: 'metAt must be a valid date.' };
+    metAt = d;
+  }
+
+  // notMetReason: trimmed, max 300 chars
+  const notMetReason = String(body.notMetReason || '').trim().slice(0, 300);
+
+  // Business rules
+  if (customerMet === true && customerNames.length === 0) {
+    return { ok: false, status: 400, message: 'At least one customer name is required when customerMet is true.' };
+  }
+  if (customerMet === false && notMetReason.length === 0) {
+    return { ok: false, status: 400, message: 'notMetReason is required when customerMet is false.' };
+  }
+
+  return { ok: true, customerMet, customerNames, metAt, notMetReason };
+};
+
 const saveImage = ({ file, sessionId, staffId, agentId, kind, location, models }) => {
   const actualAgentId = agentId || staffId;
   const evidenceId = `EVID-${Date.now()}-${uuidv4().substring(0, 6)}`;
@@ -235,8 +280,13 @@ exports.finishSession = async (req, res) => {
     const agentId = (req.agent && req.agent._id) || (req.staff && req.staff._id);
     const staffId = agentId.toString();
 
+    // ── customerMet block (new) ───────────────────────────────────────────────
+    const cmBlock = parseCustomerMetBlock(req.body);
+    if (cmBlock.ok === false) return fail(res, cmBlock.status, cmBlock.message);
+
+    // Older-app path: customerMet absent → remarks required (existing behaviour)
     const remarks = String(req.body.remarks || '').trim();
-    if (!remarks) return fail(res, 400, 'Remarks are required.');
+    if (cmBlock.ok === null && !remarks) return fail(res, 400, 'Remarks are required.');
 
     const session = await RecoverySession.findOne({
       sessionId,
@@ -260,23 +310,33 @@ exports.finishSession = async (req, res) => {
       evidence = await saveImage({ file: req.file, sessionId, staffId, agentId, kind: 'END_SPEEDOMETER', location: endLocation, models: req.models });
     }
 
-    let nlpSummary, nlpCategory, nlpDetails;
-    try {
-      ({ nlpSummary, nlpCategory, nlpDetails } = summarize(remarks));
-    } catch (_e) {
-      nlpSummary = ''; nlpCategory = 'GENERAL';
-      nlpDetails = { names: [], amounts: [], dates: [], phones: [], keyPoints: [] };
-    }
-
     const endTime = new Date();
     session.endTime = endTime;
     session.status = 'COMPLETED';
-    session.remarks = remarks;
-    session.rawRemarks = remarks;
-    session.visitNotes = remarks;
-    session.nlpSummary = nlpSummary;
-    session.nlpCategory = nlpCategory;
-    session.nlpDetails = nlpDetails;
+
+    if (cmBlock.ok === true) {
+      // New customerMet path: skip NLP, leave remarks/nlp fields empty
+      session.customerMet = cmBlock.customerMet;
+      session.customerNames = cmBlock.customerNames;
+      session.metAt = cmBlock.metAt;
+      session.notMetReason = cmBlock.notMetReason;
+      // remarks, rawRemarks, visitNotes, nlpSummary, nlpCategory, nlpDetails left as-is (empty defaults)
+    } else {
+      // Older-app path: remarks-based flow with NLP
+      let nlpSummary, nlpCategory, nlpDetails;
+      try {
+        ({ nlpSummary, nlpCategory, nlpDetails } = summarize(remarks));
+      } catch (_e) {
+        nlpSummary = ''; nlpCategory = 'GENERAL';
+        nlpDetails = { names: [], amounts: [], dates: [], phones: [], keyPoints: [] };
+      }
+      session.remarks = remarks;
+      session.rawRemarks = remarks;
+      session.visitNotes = remarks;
+      session.nlpSummary = nlpSummary;
+      session.nlpCategory = nlpCategory;
+      session.nlpDetails = nlpDetails;
+    }
     if (evidence) session.endSpeedometerEvidenceId = evidence.evidenceId;
     session.durationSeconds = Number(req.body.durationSeconds) ||
       Math.round((endTime.getTime() - new Date(session.startTime).getTime()) / 1000);
@@ -347,27 +407,42 @@ exports.finishSessionWalk = async (req, res) => {
       return fail(res, 400, 'Ending speedometer photo is required for Bike/Car recovery. Use the finish endpoint with photo.');
     }
 
+    // ── customerMet block (new) ───────────────────────────────────────────────
+    const cmBlock = parseCustomerMetBlock(req.body);
+    if (cmBlock.ok === false) return fail(res, cmBlock.status, cmBlock.message);
+
+    // Older-app path: customerMet absent → remarks required (existing behaviour)
     const remarks = String(req.body.remarks || '').trim();
-    if (!remarks) return fail(res, 400, 'Remarks are required.');
+    if (cmBlock.ok === null && !remarks) return fail(res, 400, 'Remarks are required.');
 
     const endLocation = parseJson(req.body.endLocation, null);
-    let nlpSummary, nlpCategory, nlpDetails;
-    try {
-      ({ nlpSummary, nlpCategory, nlpDetails } = summarize(remarks));
-    } catch (_e) {
-      nlpSummary = ''; nlpCategory = 'GENERAL';
-      nlpDetails = { names: [], amounts: [], dates: [], phones: [], keyPoints: [] };
-    }
 
     const endTime = new Date();
     session.endTime = endTime;
     session.status = 'COMPLETED';
-    session.remarks = remarks;
-    session.rawRemarks = remarks;
-    session.visitNotes = remarks;
-    session.nlpSummary = nlpSummary;
-    session.nlpCategory = nlpCategory;
-    session.nlpDetails = nlpDetails;
+
+    if (cmBlock.ok === true) {
+      // New customerMet path: skip NLP, leave remarks/nlp fields empty
+      session.customerMet = cmBlock.customerMet;
+      session.customerNames = cmBlock.customerNames;
+      session.metAt = cmBlock.metAt;
+      session.notMetReason = cmBlock.notMetReason;
+    } else {
+      // Older-app path: remarks-based flow with NLP
+      let nlpSummary, nlpCategory, nlpDetails;
+      try {
+        ({ nlpSummary, nlpCategory, nlpDetails } = summarize(remarks));
+      } catch (_e) {
+        nlpSummary = ''; nlpCategory = 'GENERAL';
+        nlpDetails = { names: [], amounts: [], dates: [], phones: [], keyPoints: [] };
+      }
+      session.remarks = remarks;
+      session.rawRemarks = remarks;
+      session.visitNotes = remarks;
+      session.nlpSummary = nlpSummary;
+      session.nlpCategory = nlpCategory;
+      session.nlpDetails = nlpDetails;
+    }
     session.durationSeconds = Number(req.body.durationSeconds) ||
       Math.round((endTime.getTime() - new Date(session.startTime).getTime()) / 1000);
     if (req.body.distanceMeters !== undefined) {
@@ -484,24 +559,37 @@ exports.syncOfflineSession = async (req, res) => {
         existing.endSpeedometerEvidenceId = endEv.evidenceId;
       }
 
-      const remarks = String(body.remarks || body.rawRemarks || existing.remarks || '').trim();
-      if (!remarks) return fail(res, 400, 'Customer visit remarks are required.');
+      // ── customerMet block (new) ─────────────────────────────────────────────
+      const cmBlock1 = parseCustomerMetBlock(body);
+      if (cmBlock1.ok === false) return fail(res, cmBlock1.status, cmBlock1.message);
 
-      let nlpSummary, nlpCategory, nlpDetails;
-      try {
-        ({ nlpSummary, nlpCategory, nlpDetails } = summarize(remarks));
-      } catch (_e) {
-        nlpSummary = ''; nlpCategory = 'GENERAL';
-        nlpDetails = { names: [], amounts: [], dates: [], phones: [], keyPoints: [] };
-      }
+      const remarks = String(body.remarks || body.rawRemarks || existing.remarks || '').trim();
+      if (cmBlock1.ok === null && !remarks) return fail(res, 400, 'Customer visit remarks are required.');
+
       existing.endTime = body.endTime ? new Date(body.endTime) : new Date();
       existing.status = 'COMPLETED';
-      existing.remarks = remarks;
-      existing.rawRemarks = remarks;
-      existing.visitNotes = remarks;
-      existing.nlpSummary = nlpSummary;
-      existing.nlpCategory = nlpCategory;
-      existing.nlpDetails = nlpDetails;
+
+      if (cmBlock1.ok === true) {
+        existing.customerMet = cmBlock1.customerMet;
+        existing.customerNames = cmBlock1.customerNames;
+        existing.metAt = cmBlock1.metAt;
+        existing.notMetReason = cmBlock1.notMetReason;
+      } else {
+        let nlpSummary, nlpCategory, nlpDetails;
+        try {
+          ({ nlpSummary, nlpCategory, nlpDetails } = summarize(remarks));
+        } catch (_e) {
+          nlpSummary = ''; nlpCategory = 'GENERAL';
+          nlpDetails = { names: [], amounts: [], dates: [], phones: [], keyPoints: [] };
+        }
+        existing.remarks = remarks;
+        existing.rawRemarks = remarks;
+        existing.visitNotes = remarks;
+        existing.nlpSummary = nlpSummary;
+        existing.nlpCategory = nlpCategory;
+        existing.nlpDetails = nlpDetails;
+      }
+
       if (body.durationSeconds !== undefined) existing.durationSeconds = Number(body.durationSeconds) || 0;
       if (body.distanceMeters !== undefined) existing.distanceMeters = Number(body.distanceMeters) || 0;
       if (body.movingSeconds !== undefined && body.movingSeconds !== null && body.movingSeconds !== '') {
@@ -573,8 +661,13 @@ exports.syncOfflineSession = async (req, res) => {
       }
     }
 
+    // ── customerMet block (new) ─────────────────────────────────────────────
+    const cmBlock2 = parseCustomerMetBlock(body);
+    if (cmBlock2.ok === false) return fail(res, cmBlock2.status, cmBlock2.message);
+
+    // Older-app path: customerMet absent → remarks required (existing behaviour)
     const remarks = String(body.remarks || body.rawRemarks || '').trim();
-    if (!remarks) return fail(res, 400, 'Customer visit remarks are required.');
+    if (cmBlock2.ok === null && !remarks) return fail(res, 400, 'Customer visit remarks are required.');
 
     const sessionId = (body.sessionId && String(body.sessionId).startsWith('SESS-'))
       ? String(body.sessionId)
@@ -610,14 +703,6 @@ exports.syncOfflineSession = async (req, res) => {
       });
     }
 
-    let nlpSummary, nlpCategory, nlpDetails;
-    try {
-      ({ nlpSummary, nlpCategory, nlpDetails } = summarize(remarks));
-    } catch (_e) {
-      nlpSummary = ''; nlpCategory = 'GENERAL';
-      nlpDetails = { names: [], amounts: [], dates: [], phones: [], keyPoints: [] };
-    }
-
     let assignmentId = body.assignmentId;
     let customerId = body.customerId;
     let loanId = body.loanId;
@@ -633,6 +718,35 @@ exports.syncOfflineSession = async (req, res) => {
         customerId = agentId;
         loanId = agentId;
       }
+    }
+
+    // Build the create payload, branching on customerMet vs older-app path
+    let createPayload;
+    if (cmBlock2.ok === true) {
+      // New customerMet path: skip NLP, leave remarks/nlp fields empty
+      createPayload = {
+        customerMet: cmBlock2.customerMet,
+        customerNames: cmBlock2.customerNames,
+        metAt: cmBlock2.metAt,
+        notMetReason: cmBlock2.notMetReason,
+      };
+    } else {
+      // Older-app path: remarks-based flow with NLP
+      let nlpSummary, nlpCategory, nlpDetails;
+      try {
+        ({ nlpSummary, nlpCategory, nlpDetails } = summarize(remarks));
+      } catch (_e) {
+        nlpSummary = ''; nlpCategory = 'GENERAL';
+        nlpDetails = { names: [], amounts: [], dates: [], phones: [], keyPoints: [] };
+      }
+      createPayload = {
+        remarks,
+        rawRemarks: remarks,
+        visitNotes: remarks,
+        nlpSummary,
+        nlpCategory,
+        nlpDetails,
+      };
     }
 
     const session = await RecoverySession.create({
@@ -656,17 +770,12 @@ exports.syncOfflineSession = async (req, res) => {
       unknownSeconds: (body.unknownSeconds !== undefined && body.unknownSeconds !== null && body.unknownSeconds !== '') ? Number(body.unknownSeconds) : null,
       startAddress: body.startAddress ? String(body.startAddress).trim().slice(0, 300) : '',
       endAddress: body.endAddress ? String(body.endAddress).trim().slice(0, 300) : '',
-      remarks,
-      rawRemarks: remarks,
-      visitNotes: remarks,
-      nlpSummary,
-      nlpCategory,
-      nlpDetails,
       startSpeedometerEvidenceId: startEvidence ? startEvidence.evidenceId : '',
       endSpeedometerEvidenceId: endEvidence ? endEvidence.evidenceId : '',
       startLocation: rules.pickLocation(startLoc),
       endLocation: rules.pickLocation(endLoc),
       area: body.area || '',
+      ...createPayload,
     });
 
     // Persist GPS tracking points
