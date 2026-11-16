@@ -77,4 +77,6 @@ const recoveryReportSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-module.exports = mongoose.model('RecoveryReport', recoveryReportSchema);
+const RecoveryReport = mongoose.model('RecoveryReport', recoveryReportSchema);
+RecoveryReport.schema = recoveryReportSchema;
+module.exports = RecoveryReport;

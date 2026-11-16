@@ -1,16 +1,14 @@
-const RecoveryReport = require('../models/RecoveryReport');
-const Assignment = require('../models/Assignment');
-const Loan = require('../models/Loan');
 const memoryStore = require('../services/store');
 const { getIsConnected } = require('../config/db');
 
 exports.getDashboardStats = async (req, res) => {
   try {
+    const { Assignment, RecoveryReport } = req.models || {};
     const staffId = req.staff._id.toString();
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    if (getIsConnected()) {
+    if (req.models || getIsConnected()) {
       const assignments = await Assignment.find({ staffId }).populate('loanId');
       const todayReports = await RecoveryReport.find({ staffId, submittedAt: { $gte: today } });
       const allReports = await RecoveryReport.find({ staffId });
@@ -93,10 +91,11 @@ exports.getDashboardStats = async (req, res) => {
 
 exports.getCollectionHistory = async (req, res) => {
   try {
+    const { RecoveryReport } = req.models || {};
     const staffId = req.staff._id.toString();
     let reports;
 
-    if (getIsConnected()) {
+    if (req.models || getIsConnected()) {
       reports = await RecoveryReport.find({ staffId }).sort({ submittedAt: -1 });
     } else {
       await memoryStore.initDefaults();

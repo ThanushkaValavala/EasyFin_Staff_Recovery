@@ -1,10 +1,10 @@
 const mongoose = require('mongoose');
 const { v4: uuidv4 } = require('uuid');
-const RecoverySession = require('../models/RecoverySession');
-const Assignment = require('../models/Assignment');
-const Evidence = require('../models/Evidence');
-const TrackingPoint = require('../models/TrackingPoint');
-const Staff = require('../models/Staff');
+
+
+
+
+
 const { getIsConnected } = require('../config/db');
 const rules = require('../services/recoveryRules');
 const { summarize } = require('../services/nlpSummarizer');
@@ -16,10 +16,56 @@ const parseJson = (v, fallback) => {
   try { return v ? JSON.parse(v) : fallback; } catch (e) { return fallback; }
 };
 
-const saveImage = ({ file, sessionId, staffId, agentId, kind, location }) => {
+/**
+ * Parse and validate the customerMet block from a request body.
+ * Returns { ok: true, customerMet, customerNames, metAt, notMetReason }
+ * or      { ok: false, status, message } on validation failure.
+ * Returns { ok: null } when customerMet is absent (older-app path).
+ */
+const parseCustomerMetBlock = (body) => {
+  const rawCm = body.customerMet;
+  if (rawCm === undefined || rawCm === null || rawCm === '') return { ok: null };
+
+  let customerMet;
+  if (rawCm === true  || rawCm === 'true')  customerMet = true;
+  else if (rawCm === false || rawCm === 'false') customerMet = false;
+  else return { ok: false, status: 400, message: 'customerMet must be true or false.' };
+
+  // customerNames: accept JSON string or array; trim; drop empties; cap at 5; each max 60 chars
+  let rawNames = parseJson(body.customerNames, body.customerNames);
+  if (!Array.isArray(rawNames)) rawNames = rawNames ? [String(rawNames)] : [];
+  const customerNames = rawNames
+    .map((n) => String(n).trim().slice(0, 60))
+    .filter((n) => n.length > 0)
+    .slice(0, 5);
+
+  // metAt: valid date only
+  let metAt = null;
+  if (body.metAt !== undefined && body.metAt !== null && body.metAt !== '') {
+    const d = new Date(body.metAt);
+    if (isNaN(d.getTime())) return { ok: false, status: 400, message: 'metAt must be a valid date.' };
+    metAt = d;
+  }
+
+  // notMetReason: trimmed, max 300 chars
+  const notMetReason = String(body.notMetReason || '').trim().slice(0, 300);
+
+  // Business rules
+  if (customerMet === true && customerNames.length === 0) {
+    return { ok: false, status: 400, message: 'At least one customer name is required when customerMet is true.' };
+  }
+  if (customerMet === false && notMetReason.length === 0) {
+    return { ok: false, status: 400, message: 'notMetReason is required when customerMet is false.' };
+  }
+
+  return { ok: true, customerMet, customerNames, metAt, notMetReason };
+};
+
+const saveImage = ({ file, sessionId, staffId, agentId, kind, location, models }) => {
   const actualAgentId = agentId || staffId;
   const evidenceId = `EVID-${Date.now()}-${uuidv4().substring(0, 6)}`;
-  return Evidence.create({
+  const EvidenceModel = models && models.Evidence;
+  return EvidenceModel.create({
     evidenceId,
     sessionId,
     agentId: actualAgentId,
@@ -42,14 +88,16 @@ const errorMessage = (error, fallback) =>
 
 // Atomically increment agent statistics after a successful recovery
 // Uses atomic check-and-set on session.statsIncremented to prevent duplicate counts
-async function incrementAgentStats(agentId, distanceMeters, session) {
+async function incrementAgentStats(agentId, distanceMeters, session, models) {
   try {
-    const sessionDoc = await RecoverySession.findOne({ _id: session._id });
+    const RecoverySessionModel = models && models.RecoverySession;
+    const StaffModel = models && models.Staff;
+    const sessionDoc = await RecoverySessionModel.findOne({ _id: session._id });
     if (sessionDoc && sessionDoc.statsIncremented) {
       return; // Already incremented!
     }
 
-    const updateRes = await RecoverySession.updateOne(
+    const updateRes = await RecoverySessionModel.updateOne(
       { _id: session._id, statsIncremented: { $ne: true } },
       { $set: { statsIncremented: true } }
     );
@@ -60,7 +108,7 @@ async function incrementAgentStats(agentId, distanceMeters, session) {
     const distanceKm = Number(distanceMeters) / 1000 || 0;
     const sessionIdForHistory = session.sessionId || session._id.toString();
 
-    await Staff.findOneAndUpdate(
+    await StaffModel.findOneAndUpdate(
       { _id: agentId },
       {
         $inc: {
@@ -87,10 +135,11 @@ async function incrementAgentStats(agentId, distanceMeters, session) {
 
 // POST /recovery/start-with-photo (multipart: startPhoto + fields, or JSON for WALK/OTHER)
 exports.startWithPhoto = async (req, res) => {
+  const { RecoverySession, Assignment, Evidence, TrackingPoint, Staff } = req.models || {};
   let evidence = null;
   let session = null;
   try {
-    if (!getIsConnected()) return fail(res, 503, 'Database is not connected. Try again shortly.');
+    if (!req.models && !getIsConnected()) return fail(res, 503, 'Database is not connected. Try again shortly.');
 
     const agentId = (req.agent && req.agent._id) || (req.staff && req.staff._id);
     const staffId = agentId.toString();
@@ -179,7 +228,7 @@ exports.startWithPhoto = async (req, res) => {
 
     if (req.file) {
       evidence = await saveImage({
-        file: req.file, sessionId, staffId, agentId, kind: 'START_SPEEDOMETER', location: initialLocation
+        file: req.file, sessionId, staffId, agentId, kind: 'START_SPEEDOMETER', location: initialLocation, models: req.models
       });
     }
 
@@ -224,14 +273,20 @@ exports.startWithPhoto = async (req, res) => {
 
 // POST /recovery/sessions/:sessionId/finish (multipart: endPhoto + remarks)
 exports.finishSession = async (req, res) => {
+  const { RecoverySession, Assignment, Evidence, TrackingPoint, Staff } = req.models || {};
   try {
-    if (!getIsConnected()) return fail(res, 503, 'Database is not connected. Try again shortly.');
+    if (!req.models && !getIsConnected()) return fail(res, 503, 'Database is not connected. Try again shortly.');
     const { sessionId } = req.params;
     const agentId = (req.agent && req.agent._id) || (req.staff && req.staff._id);
     const staffId = agentId.toString();
 
+    // ── customerMet block (new) ───────────────────────────────────────────────
+    const cmBlock = parseCustomerMetBlock(req.body);
+    if (cmBlock.ok === false) return fail(res, cmBlock.status, cmBlock.message);
+
+    // Older-app path: customerMet absent → remarks required (existing behaviour)
     const remarks = String(req.body.remarks || '').trim();
-    if (!remarks) return fail(res, 400, 'Remarks are required.');
+    if (cmBlock.ok === null && !remarks) return fail(res, 400, 'Remarks are required.');
 
     const session = await RecoverySession.findOne({
       sessionId,
@@ -252,19 +307,36 @@ exports.finishSession = async (req, res) => {
 
     let evidence = null;
     if (req.file) {
-      evidence = await saveImage({ file: req.file, sessionId, staffId, agentId, kind: 'END_SPEEDOMETER', location: endLocation });
+      evidence = await saveImage({ file: req.file, sessionId, staffId, agentId, kind: 'END_SPEEDOMETER', location: endLocation, models: req.models });
     }
-
-    const { nlpSummary, nlpCategory } = summarize(remarks);
 
     const endTime = new Date();
     session.endTime = endTime;
     session.status = 'COMPLETED';
-    session.remarks = remarks;
-    session.rawRemarks = remarks;
-    session.visitNotes = remarks;
-    session.nlpSummary = nlpSummary;
-    session.nlpCategory = nlpCategory;
+
+    if (cmBlock.ok === true) {
+      // New customerMet path: skip NLP, leave remarks/nlp fields empty
+      session.customerMet = cmBlock.customerMet;
+      session.customerNames = cmBlock.customerNames;
+      session.metAt = cmBlock.metAt;
+      session.notMetReason = cmBlock.notMetReason;
+      // remarks, rawRemarks, visitNotes, nlpSummary, nlpCategory, nlpDetails left as-is (empty defaults)
+    } else {
+      // Older-app path: remarks-based flow with NLP
+      let nlpSummary, nlpCategory, nlpDetails;
+      try {
+        ({ nlpSummary, nlpCategory, nlpDetails } = summarize(remarks));
+      } catch (_e) {
+        nlpSummary = ''; nlpCategory = 'GENERAL';
+        nlpDetails = { names: [], amounts: [], dates: [], phones: [], keyPoints: [] };
+      }
+      session.remarks = remarks;
+      session.rawRemarks = remarks;
+      session.visitNotes = remarks;
+      session.nlpSummary = nlpSummary;
+      session.nlpCategory = nlpCategory;
+      session.nlpDetails = nlpDetails;
+    }
     if (evidence) session.endSpeedometerEvidenceId = evidence.evidenceId;
     session.durationSeconds = Number(req.body.durationSeconds) ||
       Math.round((endTime.getTime() - new Date(session.startTime).getTime()) / 1000);
@@ -302,7 +374,7 @@ exports.finishSession = async (req, res) => {
     }
 
     // Atomically increment agent stats (duplicate-safe)
-    await incrementAgentStats(agentId, session.distanceMeters, session);
+    await incrementAgentStats(agentId, session.distanceMeters, session, req.models);
 
     return res.status(200).json({ success: true, message: 'Recovery submitted.', session });
   } catch (error) {
@@ -313,8 +385,9 @@ exports.finishSession = async (req, res) => {
 
 // POST /recovery/sessions/:sessionId/finish-walk (JSON body, no photo — Walk & Other modes)
 exports.finishSessionWalk = async (req, res) => {
+  const { RecoverySession, Assignment, Evidence, TrackingPoint, Staff } = req.models || {};
   try {
-    if (!getIsConnected()) return fail(res, 503, 'Database not connected.');
+    if (!req.models && !getIsConnected()) return fail(res, 503, 'Database not connected.');
     const { sessionId } = req.params;
     const agentId = (req.agent && req.agent._id) || (req.staff && req.staff._id);
     const staffId = agentId.toString();
@@ -334,20 +407,42 @@ exports.finishSessionWalk = async (req, res) => {
       return fail(res, 400, 'Ending speedometer photo is required for Bike/Car recovery. Use the finish endpoint with photo.');
     }
 
+    // ── customerMet block (new) ───────────────────────────────────────────────
+    const cmBlock = parseCustomerMetBlock(req.body);
+    if (cmBlock.ok === false) return fail(res, cmBlock.status, cmBlock.message);
+
+    // Older-app path: customerMet absent → remarks required (existing behaviour)
     const remarks = String(req.body.remarks || '').trim();
-    if (!remarks) return fail(res, 400, 'Remarks are required.');
+    if (cmBlock.ok === null && !remarks) return fail(res, 400, 'Remarks are required.');
 
     const endLocation = parseJson(req.body.endLocation, null);
-    const { nlpSummary, nlpCategory } = summarize(remarks);
 
     const endTime = new Date();
     session.endTime = endTime;
     session.status = 'COMPLETED';
-    session.remarks = remarks;
-    session.rawRemarks = remarks;
-    session.visitNotes = remarks;
-    session.nlpSummary = nlpSummary;
-    session.nlpCategory = nlpCategory;
+
+    if (cmBlock.ok === true) {
+      // New customerMet path: skip NLP, leave remarks/nlp fields empty
+      session.customerMet = cmBlock.customerMet;
+      session.customerNames = cmBlock.customerNames;
+      session.metAt = cmBlock.metAt;
+      session.notMetReason = cmBlock.notMetReason;
+    } else {
+      // Older-app path: remarks-based flow with NLP
+      let nlpSummary, nlpCategory, nlpDetails;
+      try {
+        ({ nlpSummary, nlpCategory, nlpDetails } = summarize(remarks));
+      } catch (_e) {
+        nlpSummary = ''; nlpCategory = 'GENERAL';
+        nlpDetails = { names: [], amounts: [], dates: [], phones: [], keyPoints: [] };
+      }
+      session.remarks = remarks;
+      session.rawRemarks = remarks;
+      session.visitNotes = remarks;
+      session.nlpSummary = nlpSummary;
+      session.nlpCategory = nlpCategory;
+      session.nlpDetails = nlpDetails;
+    }
     session.durationSeconds = Number(req.body.durationSeconds) ||
       Math.round((endTime.getTime() - new Date(session.startTime).getTime()) / 1000);
     if (req.body.distanceMeters !== undefined) {
@@ -383,7 +478,7 @@ exports.finishSessionWalk = async (req, res) => {
     }
 
     // Atomically increment agent stats
-    await incrementAgentStats(agentId, session.distanceMeters, session);
+    await incrementAgentStats(agentId, session.distanceMeters, session, req.models);
 
     return res.status(200).json({ success: true, message: 'Recovery submitted.', session });
   } catch (error) {
@@ -394,8 +489,9 @@ exports.finishSessionWalk = async (req, res) => {
 
 // GET /recovery/history — returns all completed sessions for this agent (excluding rawRemarks)
 exports.getHistory = async (req, res) => {
+  const { RecoverySession, Assignment, Evidence, TrackingPoint, Staff } = req.models || {};
   try {
-    if (!getIsConnected()) return fail(res, 503, 'Database not connected.');
+    if (!req.models && !getIsConnected()) return fail(res, 503, 'Database not connected.');
     const agentId = (req.agent && req.agent._id) || (req.staff && req.staff._id);
     const staffId = agentId.toString();
 
@@ -417,8 +513,9 @@ exports.getHistory = async (req, res) => {
 
 // POST /recovery/sync — accepts a completed offline session and saves/reconciles it
 exports.syncOfflineSession = async (req, res) => {
+  const { RecoverySession, Assignment, Evidence, TrackingPoint, Staff } = req.models || {};
   try {
-    if (!getIsConnected()) return fail(res, 503, 'Database not connected.');
+    if (!req.models && !getIsConnected()) return fail(res, 503, 'Database not connected.');
     const agentId = (req.agent && req.agent._id) || (req.staff && req.staff._id);
     const staffId = agentId.toString();
     const body = req.body || {};
@@ -456,22 +553,43 @@ exports.syncOfflineSession = async (req, res) => {
           staffId,
           agentId,
           kind: 'END_SPEEDOMETER',
-          location: endLoc
+          location: endLoc,
+          models: req.models
         });
         existing.endSpeedometerEvidenceId = endEv.evidenceId;
       }
 
-      const remarks = String(body.remarks || body.rawRemarks || existing.remarks || '').trim();
-      if (!remarks) return fail(res, 400, 'Customer visit remarks are required.');
+      // ── customerMet block (new) ─────────────────────────────────────────────
+      const cmBlock1 = parseCustomerMetBlock(body);
+      if (cmBlock1.ok === false) return fail(res, cmBlock1.status, cmBlock1.message);
 
-      const { nlpSummary, nlpCategory } = summarize(remarks);
+      const remarks = String(body.remarks || body.rawRemarks || existing.remarks || '').trim();
+      if (cmBlock1.ok === null && !remarks) return fail(res, 400, 'Customer visit remarks are required.');
+
       existing.endTime = body.endTime ? new Date(body.endTime) : new Date();
       existing.status = 'COMPLETED';
-      existing.remarks = remarks;
-      existing.rawRemarks = remarks;
-      existing.visitNotes = remarks;
-      existing.nlpSummary = nlpSummary;
-      existing.nlpCategory = nlpCategory;
+
+      if (cmBlock1.ok === true) {
+        existing.customerMet = cmBlock1.customerMet;
+        existing.customerNames = cmBlock1.customerNames;
+        existing.metAt = cmBlock1.metAt;
+        existing.notMetReason = cmBlock1.notMetReason;
+      } else {
+        let nlpSummary, nlpCategory, nlpDetails;
+        try {
+          ({ nlpSummary, nlpCategory, nlpDetails } = summarize(remarks));
+        } catch (_e) {
+          nlpSummary = ''; nlpCategory = 'GENERAL';
+          nlpDetails = { names: [], amounts: [], dates: [], phones: [], keyPoints: [] };
+        }
+        existing.remarks = remarks;
+        existing.rawRemarks = remarks;
+        existing.visitNotes = remarks;
+        existing.nlpSummary = nlpSummary;
+        existing.nlpCategory = nlpCategory;
+        existing.nlpDetails = nlpDetails;
+      }
+
       if (body.durationSeconds !== undefined) existing.durationSeconds = Number(body.durationSeconds) || 0;
       if (body.distanceMeters !== undefined) existing.distanceMeters = Number(body.distanceMeters) || 0;
       if (body.movingSeconds !== undefined && body.movingSeconds !== null && body.movingSeconds !== '') {
@@ -516,7 +634,7 @@ exports.syncOfflineSession = async (req, res) => {
         }
       }
 
-      await incrementAgentStats(agentId, existing.distanceMeters, existing);
+      await incrementAgentStats(agentId, existing.distanceMeters, existing, req.models);
       return res.status(200).json({ success: true, session: existing });
     }
 
@@ -543,8 +661,13 @@ exports.syncOfflineSession = async (req, res) => {
       }
     }
 
+    // ── customerMet block (new) ─────────────────────────────────────────────
+    const cmBlock2 = parseCustomerMetBlock(body);
+    if (cmBlock2.ok === false) return fail(res, cmBlock2.status, cmBlock2.message);
+
+    // Older-app path: customerMet absent → remarks required (existing behaviour)
     const remarks = String(body.remarks || body.rawRemarks || '').trim();
-    if (!remarks) return fail(res, 400, 'Customer visit remarks are required.');
+    if (cmBlock2.ok === null && !remarks) return fail(res, 400, 'Customer visit remarks are required.');
 
     const sessionId = (body.sessionId && String(body.sessionId).startsWith('SESS-'))
       ? String(body.sessionId)
@@ -563,7 +686,8 @@ exports.syncOfflineSession = async (req, res) => {
         staffId,
         agentId,
         kind: 'START_SPEEDOMETER',
-        location: startLoc
+        location: startLoc,
+        models: req.models
       });
     }
 
@@ -574,11 +698,10 @@ exports.syncOfflineSession = async (req, res) => {
         staffId,
         agentId,
         kind: 'END_SPEEDOMETER',
-        location: endLoc
+        location: endLoc,
+        models: req.models
       });
     }
-
-    const { nlpSummary, nlpCategory } = summarize(remarks);
 
     let assignmentId = body.assignmentId;
     let customerId = body.customerId;
@@ -595,6 +718,35 @@ exports.syncOfflineSession = async (req, res) => {
         customerId = agentId;
         loanId = agentId;
       }
+    }
+
+    // Build the create payload, branching on customerMet vs older-app path
+    let createPayload;
+    if (cmBlock2.ok === true) {
+      // New customerMet path: skip NLP, leave remarks/nlp fields empty
+      createPayload = {
+        customerMet: cmBlock2.customerMet,
+        customerNames: cmBlock2.customerNames,
+        metAt: cmBlock2.metAt,
+        notMetReason: cmBlock2.notMetReason,
+      };
+    } else {
+      // Older-app path: remarks-based flow with NLP
+      let nlpSummary, nlpCategory, nlpDetails;
+      try {
+        ({ nlpSummary, nlpCategory, nlpDetails } = summarize(remarks));
+      } catch (_e) {
+        nlpSummary = ''; nlpCategory = 'GENERAL';
+        nlpDetails = { names: [], amounts: [], dates: [], phones: [], keyPoints: [] };
+      }
+      createPayload = {
+        remarks,
+        rawRemarks: remarks,
+        visitNotes: remarks,
+        nlpSummary,
+        nlpCategory,
+        nlpDetails,
+      };
     }
 
     const session = await RecoverySession.create({
@@ -618,16 +770,12 @@ exports.syncOfflineSession = async (req, res) => {
       unknownSeconds: (body.unknownSeconds !== undefined && body.unknownSeconds !== null && body.unknownSeconds !== '') ? Number(body.unknownSeconds) : null,
       startAddress: body.startAddress ? String(body.startAddress).trim().slice(0, 300) : '',
       endAddress: body.endAddress ? String(body.endAddress).trim().slice(0, 300) : '',
-      remarks,
-      rawRemarks: remarks,
-      visitNotes: remarks,
-      nlpSummary,
-      nlpCategory,
       startSpeedometerEvidenceId: startEvidence ? startEvidence.evidenceId : '',
       endSpeedometerEvidenceId: endEvidence ? endEvidence.evidenceId : '',
       startLocation: rules.pickLocation(startLoc),
       endLocation: rules.pickLocation(endLoc),
       area: body.area || '',
+      ...createPayload,
     });
 
     // Persist GPS tracking points
@@ -661,7 +809,7 @@ exports.syncOfflineSession = async (req, res) => {
     }
 
     // Atomically increment agent stats
-    await incrementAgentStats(agentId, session.distanceMeters, session);
+    await incrementAgentStats(agentId, session.distanceMeters, session, req.models);
 
     return res.status(201).json({ success: true, session });
   } catch (error) {
@@ -672,8 +820,9 @@ exports.syncOfflineSession = async (req, res) => {
 
 // GET /recovery/stats — returns agent's recovery statistics
 exports.getAgentStats = async (req, res) => {
+  const { RecoverySession, Assignment, Evidence, TrackingPoint, Staff } = req.models || {};
   try {
-    if (!getIsConnected()) return fail(res, 503, 'Database not connected.');
+    if (!req.models && !getIsConnected()) return fail(res, 503, 'Database not connected.');
     const agentId = (req.agent && req.agent._id) || (req.staff && req.staff._id);
     const staffId = agentId.toString();
 

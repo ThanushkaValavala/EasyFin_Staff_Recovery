@@ -34,4 +34,6 @@ trackingPointSchema.pre('save', function (next) {
   next();
 });
 
-module.exports = mongoose.model('TrackingPoint', trackingPointSchema);
+const TrackingPoint = mongoose.model('TrackingPoint', trackingPointSchema);
+TrackingPoint.schema = trackingPointSchema;
+module.exports = TrackingPoint;

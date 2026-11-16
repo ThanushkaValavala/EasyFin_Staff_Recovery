@@ -11,7 +11,7 @@ router.get('/profile', protect, async (req, res) => {
     // Also attach live stats computed from RecoverySession collection
     try {
       const mongoose = require('mongoose');
-      const RecoverySession = require('../models/RecoverySession');
+      const RecoverySession = req.models.RecoverySession;
       const agentId = staff._id;
       const staffId = agentId.toString();
 

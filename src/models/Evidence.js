@@ -30,4 +30,6 @@ evidenceSchema.pre('save', function (next) {
   next();
 });
 
-module.exports = mongoose.model('Evidence', evidenceSchema);
+const Evidence = mongoose.model('Evidence', evidenceSchema);
+Evidence.schema = evidenceSchema;
+module.exports = Evidence;

@@ -36,5 +36,7 @@ branchMemberSchema.statics.normalize = function (phone) {
   return digits.slice(-10);
 };
 
-module.exports = mongoose.model('BranchMember', branchMemberSchema);
+const BranchMember = mongoose.model('BranchMember', branchMemberSchema);
+BranchMember.schema = branchMemberSchema;
+module.exports = BranchMember;
 

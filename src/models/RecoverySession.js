@@ -51,6 +51,7 @@ const recoverySessionSchema = new mongoose.Schema(
       enum: ['PAID', 'PROMISED', 'UNAVAILABLE', 'REFUSED', 'GENERAL', ''],
       default: '',
     },
+    nlpDetails: { type: mongoose.Schema.Types.Mixed, default: {} },
     vehicleType: { type: String, default: '' },
     vehicleNumber: { type: String, default: '' },
     deviceSessionId: { type: String, default: '' },
@@ -62,7 +63,11 @@ const recoverySessionSchema = new mongoose.Schema(
     startAddress: { type: String, default: '' },
     endAddress: { type: String, default: '' },
     startLocation: { latitude: { type: Number }, longitude: { type: Number }, accuracy: { type: Number, default: 0 } },
-    endLocation: { latitude: { type: Number }, longitude: { type: Number }, accuracy: { type: Number, default: 0 } }
+    endLocation: { latitude: { type: Number }, longitude: { type: Number }, accuracy: { type: Number, default: 0 } },
+    customerMet: { type: Boolean, default: null },
+    customerNames: { type: [String], default: [] },
+    metAt: { type: Date, default: null },
+    notMetReason: { type: String, default: '' }
   },
   { timestamps: true }
 );
@@ -86,4 +91,6 @@ recoverySessionSchema.pre('save', function (next) {
   next();
 });
 
-module.exports = mongoose.model('RecoverySession', recoverySessionSchema);
+const RecoverySession = mongoose.model('RecoverySession', recoverySessionSchema);
+RecoverySession.schema = recoverySessionSchema;
+module.exports = RecoverySession;

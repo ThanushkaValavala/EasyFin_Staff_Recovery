@@ -36,4 +36,6 @@ const otpRecordSchema = new mongoose.Schema(
 // TTL index: MongoDB will automatically delete documents where expiresAt < current time
 otpRecordSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
-module.exports = mongoose.model('OtpRecord', otpRecordSchema);
+const OtpRecord = mongoose.model('OtpRecord', otpRecordSchema);
+OtpRecord.schema = otpRecordSchema;
+module.exports = OtpRecord;

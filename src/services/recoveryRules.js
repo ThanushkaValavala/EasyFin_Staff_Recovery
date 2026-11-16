@@ -47,15 +47,18 @@ const pickLocation = (loc) => {
 //  1. at least one proof photo must be uploaded
 //  2. if no money was collected, remarks are required
 // Returns an error message, or null when everything is fine.
-const validateCompletion = async ({ sessionId, staffId, paymentAmount, visitNotes }) => {
+const validateCompletion = async ({ sessionId, staffId, paymentAmount, visitNotes, models }, modelsParam) => {
+  const activeModels = modelsParam || models;
+  const RecoverySessionModel = (activeModels && activeModels.RecoverySession) || RecoverySession;
+  const EvidenceModel = (activeModels && activeModels.Evidence) || Evidence;
   let session;
   let evidenceCount;
   let hasSpeedometer = false;
 
-  if (getIsConnected()) {
-    session = await RecoverySession.findOne({ sessionId, staffId });
-    evidenceCount = await Evidence.countDocuments({ sessionId, staffId });
-    hasSpeedometer = (await Evidence.countDocuments({ sessionId, staffId, caption: /^Speedometer/i })) > 0;
+  if (activeModels || getIsConnected()) {
+    session = await RecoverySessionModel.findOne({ sessionId, staffId });
+    evidenceCount = await EvidenceModel.countDocuments({ sessionId, staffId });
+    hasSpeedometer = (await EvidenceModel.countDocuments({ sessionId, staffId, caption: /^Speedometer/i })) > 0;
   } else {
     await memoryStore.initDefaults();
     session = memoryStore.sessions.find(

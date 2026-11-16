@@ -1,17 +1,11 @@
 const { v4: uuidv4 } = require('uuid');
-const RecoveryReport = require('../models/RecoveryReport');
-const RecoverySession = require('../models/RecoverySession');
-const Assignment = require('../models/Assignment');
-const Customer = require('../models/Customer');
-const Loan = require('../models/Loan');
-const StopEvent = require('../models/StopEvent');
-const Evidence = require('../models/Evidence');
 const memoryStore = require('../services/store');
 const { getIsConnected } = require('../config/db');
 const rules = require('../services/recoveryRules');
 
 exports.submitReport = async (req, res) => {
   try {
+    const { RecoveryReport, RecoverySession, Assignment, Customer, Loan, StopEvent, Evidence } = req.models || {};
     const staffId = req.staff._id.toString();
     const { sessionId, outcome, visitNotes, paymentAmount, promiseDate, durationSeconds, distanceMeters, placesVisited, evidence } = req.body;
 
@@ -19,14 +13,14 @@ exports.submitReport = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Session ID is required.' });
     }
 
-    const completionError = await rules.validateCompletion({ sessionId, staffId, paymentAmount, visitNotes });
+    const completionError = await rules.validateCompletion({ sessionId, staffId, paymentAmount, visitNotes, models: req.models });
     if (completionError) {
       return res.status(400).json({ success: false, message: completionError });
     }
 
     const reportId = `REP-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
 
-    if (getIsConnected()) {
+    if (req.models || getIsConnected()) {
       const session = await RecoverySession.findOne({ sessionId, staffId });
       if (!session) return res.status(404).json({ success: false, message: 'Recovery session not found.' });
 
@@ -159,8 +153,9 @@ exports.submitReport = async (req, res) => {
 
 exports.getReportsHistory = async (req, res) => {
   try {
+    const { RecoveryReport } = req.models || {};
     const staffId = req.staff._id.toString();
-    if (getIsConnected()) {
+    if (req.models || getIsConnected()) {
       const reports = await RecoveryReport.find({ staffId }).sort({ submittedAt: -1 });
       return res.status(200).json({ success: true, count: reports.length, reports });
     } else {
@@ -175,9 +170,10 @@ exports.getReportsHistory = async (req, res) => {
 
 exports.getReportDetail = async (req, res) => {
   try {
+    const { RecoveryReport } = req.models || {};
     const { id } = req.params;
     const staffId = req.staff._id.toString();
-    if (getIsConnected()) {
+    if (req.models || getIsConnected()) {
       const report = await RecoveryReport.findOne({ $or: [{ _id: id }, { reportId: id }], staffId });
       if (!report) return res.status(404).json({ success: false, message: 'Report not found.' });
       return res.status(200).json({ success: true, report });

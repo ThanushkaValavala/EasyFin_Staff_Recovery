@@ -1,12 +1,12 @@
 const { v4: uuidv4 } = require('uuid');
-const Evidence = require('../models/Evidence');
 const { getIsConnected } = require('../config/db');
 
 exports.uploadEvidence = async (req, res) => {
   try {
-    if (!getIsConnected()) {
+    if (!req.models && !getIsConnected()) {
       return res.status(503).json({ success: false, message: 'Database is not connected.' });
     }
+    const { Evidence } = req.models;
     const { sessionId } = req.params;
     const staffId = req.staff._id.toString();
     const { caption, latitude, longitude } = req.body;
@@ -33,6 +33,7 @@ exports.uploadEvidence = async (req, res) => {
 
 exports.getSessionEvidence = async (req, res) => {
   try {
+    const { Evidence } = req.models;
     const { sessionId } = req.params;
     const staffId = req.staff._id.toString();
     const evidences = await Evidence.find({ sessionId, staffId }).sort({ capturedAt: -1 });
@@ -44,6 +45,7 @@ exports.getSessionEvidence = async (req, res) => {
 
 exports.getEvidenceImage = async (req, res) => {
   try {
+    const { Evidence } = req.models;
     const ev = await Evidence.findOne({ evidenceId: req.params.evidenceId }).select('+data');
     if (!ev || !ev.data) return res.status(404).json({ success: false, message: 'Image not found.' });
     const isOwner = ev.staffId.toString() === req.staff._id.toString();

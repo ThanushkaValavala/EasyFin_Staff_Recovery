@@ -38,4 +38,6 @@ assignmentSchema.pre('save', function (next) {
   next();
 });
 
-module.exports = mongoose.model('Assignment', assignmentSchema);
+const Assignment = mongoose.model('Assignment', assignmentSchema);
+Assignment.schema = assignmentSchema;
+module.exports = Assignment;

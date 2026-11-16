@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
 const path = require('path');
-const { connectDB } = require('./config/db');
+const { connectBranchDbs, isBranchDbConnected } = require('./config/branchDb');
 const memoryStore = require('./services/store');
 
 const authRoutes = require('./routes/authRoutes');
@@ -31,7 +31,13 @@ app.get('/api/health', (req, res) => {
     status: 'UP',
     service: 'EasyFin Staff Recovery API',
     version: '1.0.0',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    branch1: isBranchDbConnected('Branch 1'),
+    branch2: isBranchDbConnected('Branch 2'),
+    branches: {
+      'Branch 1': isBranchDbConnected('Branch 1'),
+      'Branch 2': isBranchDbConnected('Branch 2')
+    }
   });
 });
 
@@ -55,7 +61,11 @@ app.use((err, req, res, next) => {
 
 // Start Server
 const startServer = async () => {
-  await connectDB();
+  try {
+    await connectBranchDbs();
+  } catch (err) {
+    console.error('[Branch DB] Connection error on startup:', err.message);
+  }
   await memoryStore.initDefaults();
 
   const server = app.listen(PORT, '0.0.0.0', () => {
