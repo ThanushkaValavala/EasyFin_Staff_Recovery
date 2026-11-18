@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
   ActivityIndicator, RefreshControl, Alert,
+  TextInput, KeyboardAvoidingView, Platform,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
@@ -55,6 +56,82 @@ const fmtDistance = (m) => {
   return m < 1000 ? `${Math.round(m)} m` : `${(m / 1000).toFixed(2)} km`;
 };
 
+// ── Date-filter helpers (copied exactly from RecoveriesPerDayScreen) ──────────
+
+/** Parse a Date and return a local-time date key "YYYY-MM-DD" or null */
+function toLocalDateKey(d) {
+  if (!d) return null;
+  const x = new Date(d);
+  if (isNaN(x.getTime())) return null;
+  const p = (n) => String(n).padStart(2, '0');
+  return `${x.getFullYear()}-${p(x.getMonth() + 1)}-${p(x.getDate())}`;
+}
+
+/** Parse a user-typed "DD-MM-YYYY" string into a Date (start of that local day) or null */
+function parseUserDate(str) {
+  if (!str || str.length !== 10) return null;
+  const [dd, mm, yyyy] = str.split('-');
+  const d = parseInt(dd, 10);
+  const m = parseInt(mm, 10);
+  const y = parseInt(yyyy, 10);
+  if (isNaN(d) || isNaN(m) || isNaN(y) || m < 1 || m > 12 || d < 1 || d > 31 || y < 2000) return null;
+  const date = new Date(y, m - 1, d);
+  if (isNaN(date.getTime())) return null;
+  if (date.getFullYear() !== y || date.getMonth() !== m - 1 || date.getDate() !== d) return null;
+  return date;
+}
+
+/** Format a Date as "DD-MM-YYYY" */
+function formatDDMMYYYY(date) {
+  if (!date || isNaN(date.getTime())) return '';
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(date.getDate())}-${p(date.getMonth() + 1)}-${date.getFullYear()}`;
+}
+
+/** Returns a Date at 23:59:59.999 local time for the given date */
+function endOfDay(date) {
+  const d = new Date(date);
+  d.setHours(23, 59, 59, 999);
+  return d;
+}
+
+const CHIPS = ['Today', 'Last 7 days', 'This month', 'All'];
+
+function chipRange(chip) {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  if (chip === 'Today') {
+    return { from: today, to: endOfDay(today) };
+  }
+  if (chip === 'Last 7 days') {
+    const from = new Date(today);
+    from.setDate(from.getDate() - 6);
+    return { from, to: endOfDay(today) };
+  }
+  if (chip === 'This month') {
+    const from = new Date(today.getFullYear(), today.getMonth(), 1);
+    return { from, to: endOfDay(today) };
+  }
+  // 'All'
+  return { from: null, to: null };
+}
+
+/** Format a "YYYY-MM-DD" key as a long label like "Wed, 18 Nov 2026" */
+function keyToLongLabel(key) {
+  const [y, m, d] = key.split('-');
+  const date = new Date(parseInt(y, 10), parseInt(m, 10) - 1, parseInt(d, 10));
+  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return `${days[date.getDay()]}, ${parseInt(d, 10)} ${months[date.getMonth()]} ${y}`;
+}
+
+/** Format a "YYYY-MM-DD" key as "18 Nov 2026" (no day-of-week) */
+function keyToShortLabel(key) {
+  const [y, m, d] = key.split('-');
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return `${parseInt(d, 10)} ${months[parseInt(m, 10) - 1]} ${y}`;
+}
+
 function NlpBadge({ category, summary }) {
   const colors = BADGE_COLORS[category] || BADGE_COLORS.GENERAL;
   return (
@@ -84,7 +161,7 @@ function InfoRow({ icon, label, value, wrapValue }) {
   );
 }
 
-function SessionCard({ session }) {
+export function SessionCard({ session }) {
   const vehicleLabel = session.vehicleType
     ? session.vehicleType.charAt(0).toUpperCase() + session.vehicleType.slice(1).toLowerCase()
     : 'Walk';
@@ -235,6 +312,45 @@ export default function ProfileScreen({ navigation }) {
   const [syncing, setSyncing] = useState(false);
   const [isOfflineMode, setIsOfflineMode] = useState(false);
 
+  // ── Date filter state (copied exactly from RecoveriesPerDayScreen) ──────────
+  const [selectedChip, setSelectedChip] = useState('Last 7 days');
+  const [fromText, setFromText] = useState(() => {
+    const { from } = chipRange('Last 7 days');
+    return formatDDMMYYYY(from);
+  });
+  const [toText, setToText] = useState(() => {
+    const { to } = chipRange('Last 7 days');
+    return formatDDMMYYYY(to);
+  });
+  const [rangeError, setRangeError] = useState('');
+
+  function handleChip(chip) {
+    setSelectedChip(chip);
+    setRangeError('');
+    const { from, to } = chipRange(chip);
+    setFromText(from ? formatDDMMYYYY(from) : '');
+    setToText(to ? formatDDMMYYYY(to) : '');
+  }
+
+  function handleClear() {
+    setSelectedChip('All');
+    setRangeError('');
+    setFromText('');
+    setToText('');
+  }
+
+  function handleFromChange(text) {
+    setFromText(text);
+    setSelectedChip('');
+    setRangeError('');
+  }
+
+  function handleToChange(text) {
+    setToText(text);
+    setSelectedChip('');
+    setRangeError('');
+  }
+
   const loadData = useCallback(async () => {
     try {
       const s = await SecureStore.getItemAsync('staff');
@@ -322,6 +438,58 @@ export default function ProfileScreen({ navigation }) {
     ...pendingSessions.filter(p => !sessions.some(s => s.sessionId === p.sessionId || s.deviceSessionId === p.deviceSessionId)),
     ...sessions,
   ];
+
+  // ── Computed filter range (copied exactly from RecoveriesPerDayScreen) ───────
+  const { fromDate, toDate, error } = useMemo(() => {
+    if (selectedChip === 'All' || (!fromText && !toText)) {
+      return { fromDate: null, toDate: null, error: '' };
+    }
+    if (selectedChip && selectedChip !== 'All') {
+      const { from, to } = chipRange(selectedChip);
+      return { fromDate: from, toDate: to, error: '' };
+    }
+    const from = parseUserDate(fromText);
+    const to = parseUserDate(toText);
+    if (!fromText && !toText) return { fromDate: null, toDate: null, error: '' };
+    if (fromText && !from) return { fromDate: null, toDate: null, error: 'Invalid "From" date. Use DD-MM-YYYY.' };
+    if (toText && !to) return { fromDate: null, toDate: null, error: 'Invalid "To" date. Use DD-MM-YYYY.' };
+    const toEnd = to ? endOfDay(to) : null;
+    if (from && toEnd && from > toEnd) {
+      return { fromDate: null, toDate: null, error: 'From date must be before To date.' };
+    }
+    return { fromDate: from || null, toDate: toEnd || null, error: '' };
+  }, [selectedChip, fromText, toText]);
+
+  // ── Build per-day rows with sessions (copied grouping from RecoveriesPerDayScreen) ──
+  const { dayRows, totalInRange } = useMemo(() => {
+    const groups = {}; // "YYYY-MM-DD" → [session, ...]
+
+    for (const session of allSessions) {
+      const rawDate = session.startTime || session.endTime;
+      const key = toLocalDateKey(rawDate);
+      if (!key) continue;
+
+      if (fromDate || toDate) {
+        const sessionDate = new Date(rawDate);
+        if (fromDate && sessionDate < fromDate) continue;
+        if (toDate && sessionDate > toDate) continue;
+      }
+
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(session);
+    }
+
+    const sortedKeys = Object.keys(groups).sort((a, b) => (a < b ? 1 : -1));
+    const dayRows = sortedKeys.map((key) => ({
+      dateKey: key,
+      count: groups[key].length,
+      sessions: groups[key],
+    }));
+    const totalInRange = dayRows.reduce((sum, r) => sum + r.count, 0);
+    return { dayRows, totalInRange };
+  }, [allSessions, fromDate, toDate]);
+
+  const activeError = rangeError || error;
 
   if (loading) {
     return (
@@ -421,35 +589,107 @@ export default function ProfileScreen({ navigation }) {
         </View>
       ) : null}
 
-      {/* ── RECOVERIES PER DAY ─────────────────────────────────────────── */}
-      <TouchableOpacity
-        style={styles.recoveriesPerDayRow}
-        onPress={() => navigation.navigate('RecoveriesPerDay', { sessions: allSessions })}
-        activeOpacity={0.7}
-      >
-        <View style={styles.recoveriesPerDayLeft}>
-          <Ionicons name="calendar-outline" size={18} color="#2563EB" style={{ marginRight: 10 }} />
-          <Text style={styles.recoveriesPerDayTitle}>Recoveries Per Day</Text>
-        </View>
-        <Ionicons name="chevron-forward" size={18} color="#94A3B8" />
-      </TouchableOpacity>
-
-      {/* ── COMPLETED RECOVERY HISTORY ─────────────────────────────────── */}
-      <View style={styles.historyHeaderRow}>
-        <Text style={styles.historySectionTitle}>Completed Recovery History</Text>
-        <Text style={styles.historyCountText}>{allSessions.length} Total</Text>
+      {/* ── RECOVERIES SECTION ──────────────────────────────────────────── */}
+      <View style={styles.recoveriesSectionHeader}>
+        <Text style={styles.recoveriesSectionTitle}>Recoveries</Text>
       </View>
 
-      {allSessions.length === 0 ? (
+      {/* Filter card – copied exactly from RecoveriesPerDayScreen */}
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <View style={styles.filterCard}>
+          {/* Quick chips */}
+          <View style={styles.chipsRow}>
+            {CHIPS.map((chip) => (
+              <TouchableOpacity
+                key={chip}
+                style={[styles.chip, selectedChip === chip && styles.chipActive]}
+                onPress={() => handleChip(chip)}
+                activeOpacity={0.7}
+              >
+                <Text style={[styles.chipText, selectedChip === chip && styles.chipTextActive]}>
+                  {chip}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          {/* From / To inputs */}
+          <View style={styles.inputRow}>
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>From</Text>
+              <TextInput
+                style={styles.textInput}
+                value={fromText}
+                onChangeText={handleFromChange}
+                placeholder="DD-MM-YYYY"
+                keyboardType="numeric"
+                maxLength={10}
+                placeholderTextColor="#94A3B8"
+              />
+            </View>
+            <View style={styles.inputSeparator} />
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>To</Text>
+              <TextInput
+                style={styles.textInput}
+                value={toText}
+                onChangeText={handleToChange}
+                placeholder="DD-MM-YYYY"
+                keyboardType="numeric"
+                maxLength={10}
+                placeholderTextColor="#94A3B8"
+              />
+            </View>
+          </View>
+
+          {/* Error message */}
+          {activeError ? (
+            <Text style={styles.filterErrorText}>{activeError}</Text>
+          ) : null}
+
+          {/* Clear button */}
+          <TouchableOpacity style={styles.clearBtn} onPress={handleClear} activeOpacity={0.7}>
+            <Ionicons name="close-circle-outline" size={14} color="#64748B" style={{ marginRight: 4 }} />
+            <Text style={styles.clearBtnText}>Clear</Text>
+          </TouchableOpacity>
+        </View>
+      </KeyboardAvoidingView>
+
+      {/* Day list */}
+      {dayRows.length === 0 ? (
         <View style={styles.emptyCard}>
-          <Ionicons name="time-outline" size={38} color="#94A3B8" />
-          <Text style={styles.emptyTitle}>No Completed Recoveries Yet</Text>
-          <Text style={styles.emptySub}>Recoveries you complete will appear here with NLP summaries.</Text>
+          <Ionicons name="calendar-outline" size={38} color="#94A3B8" />
+          <Text style={styles.emptyTitle}>No recoveries in this range</Text>
         </View>
       ) : (
-        allSessions.map((session, idx) => (
-          <SessionCard key={session._id || session.sessionId || session.deviceSessionId || idx} session={session} />
-        ))
+        <>
+          <View style={styles.listCard}>
+            {dayRows.map((row, idx) => (
+              <TouchableOpacity
+                key={row.dateKey}
+                style={[styles.dayRow, idx < dayRows.length - 1 && styles.dayRowBorder]}
+                onPress={() => navigation.navigate('DayRecoveries', {
+                  dateLabel: keyToShortLabel(row.dateKey),
+                  daySessions: row.sessions,
+                })}
+                activeOpacity={0.7}
+              >
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.dayDate}>{keyToLongLabel(row.dateKey)}</Text>
+                  <Text style={styles.dayCountLabel}>
+                    {row.count === 1 ? '1 recovery' : `${row.count} recoveries`}
+                  </Text>
+                </View>
+                <Ionicons name="chevron-forward" size={18} color="#94A3B8" />
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          <View style={styles.totalRow}>
+            <Text style={styles.totalLabel}>Total in range:</Text>
+            <Text style={styles.totalValue}>{totalInRange}</Text>
+          </View>
+        </>
       )}
     </ScrollView>
   );
@@ -582,4 +822,68 @@ const styles = StyleSheet.create({
   },
   customerNotMetTitle: { fontSize: 13, fontWeight: '800', color: '#DC2626', marginBottom: 4 },
   customerNotMetDetail: { fontSize: 12, fontWeight: '500', color: '#991B1B', marginTop: 2 },
+
+  // ── Recoveries section ──────────────────────────────────────────────────────
+  recoveriesSectionHeader: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    marginBottom: 12,
+  },
+  recoveriesSectionTitle: { fontSize: 16, fontWeight: '800', color: '#0F172A' },
+
+  // Filter card (copied from RecoveriesPerDayScreen styles)
+  filterCard: {
+    backgroundColor: '#FFFFFF', borderRadius: 14, padding: 16,
+    borderWidth: 1, borderColor: '#E2E8F0', marginBottom: 16,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.03, shadowRadius: 4, elevation: 1,
+  },
+  chipsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 14 },
+  chip: {
+    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20,
+    backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0',
+  },
+  chipActive: { backgroundColor: '#EFF6FF', borderColor: '#93C5FD' },
+  chipText: { fontSize: 12, fontWeight: '600', color: '#64748B' },
+  chipTextActive: { color: '#2563EB' },
+  inputRow: { flexDirection: 'row', alignItems: 'flex-end', marginBottom: 10 },
+  inputGroup: { flex: 1 },
+  inputLabel: { fontSize: 11, fontWeight: '600', color: '#64748B', textTransform: 'uppercase', marginBottom: 4 },
+  textInput: {
+    borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 8,
+    paddingHorizontal: 10, paddingVertical: 8,
+    fontSize: 13, fontWeight: '600', color: '#0F172A',
+    backgroundColor: '#F8FAFC',
+  },
+  inputSeparator: { width: 12 },
+  filterErrorText: { fontSize: 12, color: '#DC2626', fontWeight: '600', marginBottom: 8 },
+  clearBtn: {
+    flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start',
+    paddingVertical: 4, paddingHorizontal: 2,
+  },
+  clearBtnText: { fontSize: 12, color: '#64748B', fontWeight: '600' },
+
+  // Day list (card + rows)
+  listCard: {
+    backgroundColor: '#FFFFFF', borderRadius: 14, borderWidth: 1,
+    borderColor: '#E2E8F0', marginBottom: 12,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.03, shadowRadius: 4, elevation: 1,
+    overflow: 'hidden',
+  },
+  dayRow: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: 16, paddingVertical: 13,
+  },
+  dayRowBorder: { borderBottomWidth: 1, borderBottomColor: '#F1F5F9' },
+  dayDate: { fontSize: 14, fontWeight: '700', color: '#334155' },
+  dayCountLabel: { fontSize: 12, fontWeight: '500', color: '#64748B', marginTop: 2 },
+
+  // Total row
+  totalRow: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    backgroundColor: '#EFF6FF', borderRadius: 10, paddingHorizontal: 16, paddingVertical: 12,
+    borderWidth: 1, borderColor: '#BFDBFE', marginBottom: 20,
+  },
+  totalLabel: { fontSize: 13, fontWeight: '700', color: '#1E40AF' },
+  totalValue: { fontSize: 15, fontWeight: '800', color: '#1E40AF' },
 });

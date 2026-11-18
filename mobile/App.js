@@ -9,6 +9,7 @@ import ActiveRecoveryScreen from './src/screens/ActiveRecoveryScreen';
 import CompleteScreen from './src/screens/CompleteScreen';
 import ProfileScreen from './src/screens/ProfileScreen';
 import RecoveriesPerDayScreen from './src/screens/RecoveriesPerDayScreen';
+import DayRecoveriesScreen from './src/screens/DayRecoveriesScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -84,6 +85,13 @@ export default function App() {
               title: 'Recoveries Per Day',
               headerTintColor: '#0F172A',
             }}
+          />
+
+          {/* Day Recoveries detail (draws its own header) */}
+          <Stack.Screen
+            name="DayRecoveries"
+            component={DayRecoveriesScreen}
+            options={{ headerShown: false }}
           />
         </Stack.Navigator>
       </NavigationContainer>
