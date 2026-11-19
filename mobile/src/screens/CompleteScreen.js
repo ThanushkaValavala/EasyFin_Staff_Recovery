@@ -11,6 +11,7 @@ import { useAudioRecorder, AudioModule, RecordingPresets } from 'expo-audio';
 import { apiUploadFile, apiPost, apiUploadFiles, apiGet } from '../api';
 import { formatDistance, formatDuration } from '../utils/geo';
 import { savePendingSession } from '../utils/offlineStore';
+import { checkHasNumbers } from '../utils/speedometerCheck';
 
 function isNetworkError(e) {
   if (!e) return false;
@@ -36,7 +37,7 @@ async function describe(p) {
       const line = [a.name, a.street, a.city].filter(Boolean).join(', ');
       if (line) return `${line} (${coords})`;
     }
-  } catch (e) {}
+  } catch (e) { }
   return coords;
 }
 
@@ -58,7 +59,7 @@ async function getReadableAddress(p) {
       const uniqueParts = parts.filter((part, idx) => parts.indexOf(part) === idx);
       return uniqueParts.join(', ') || '';
     }
-  } catch (e) {}
+  } catch (e) { }
   return '';
 }
 
@@ -94,7 +95,7 @@ function VoiceRecorder({ onRecorded, onCleared }) {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
       if (playerRef.current) {
-        playerRef.current.remove().catch(() => {});
+        playerRef.current.remove().catch(() => { });
       }
     };
   }, []);
@@ -152,7 +153,7 @@ function VoiceRecorder({ onRecorded, onCleared }) {
     setRecorderState('idle');
     setPlayerState('stopped');
     if (playerRef.current) {
-      await playerRef.current.remove().catch(() => {});
+      await playerRef.current.remove().catch(() => { });
       playerRef.current = null;
     }
     onCleared && onCleared();
@@ -163,7 +164,7 @@ function VoiceRecorder({ onRecorded, onCleared }) {
     if (playerState === 'playing') {
       // stop playback
       if (playerRef.current) {
-        await playerRef.current.pauseAsync().catch(() => {});
+        await playerRef.current.pauseAsync().catch(() => { });
       }
       setPlayerState('stopped');
       return;
@@ -171,7 +172,7 @@ function VoiceRecorder({ onRecorded, onCleared }) {
     try {
       const { AudioPlayer } = await import('expo-audio');
       if (playerRef.current) {
-        await playerRef.current.remove().catch(() => {});
+        await playerRef.current.remove().catch(() => { });
       }
       const player = new AudioPlayer(recordedUri);
       playerRef.current = player;
@@ -321,6 +322,10 @@ export default function CompleteScreen({ route, navigation }) {
   })();
 
   const [photo, setPhoto] = useState(null);
+  const [checkingPhoto, setCheckingPhoto] = useState(false);
+  const [speedometerFailedTries, setSpeedometerFailedTries] = useState(0);
+  const [speedometerCheckError, setSpeedometerCheckError] = useState('');
+  const [lastSpeedometerPhoto, setLastSpeedometerPhoto] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [startText, setStartText] = useState('Locating...');
   const [endText, setEndText] = useState('Locating...');
@@ -384,7 +389,41 @@ export default function CompleteScreen({ route, navigation }) {
       allowsEditing: false,
     });
     if (!r.canceled && r.assets && r.assets[0] && r.assets[0].uri) {
-      setPhoto(r.assets[0].uri);
+      const capturedUri = r.assets[0].uri;
+      setCheckingPhoto(true);
+      setSpeedometerCheckError('');
+      try {
+        const checkRes = await checkHasNumbers(capturedUri);
+        if (checkRes.ok) {
+          setPhoto(capturedUri);
+          setSpeedometerCheckError('');
+          setSpeedometerFailedTries(0);
+          setLastSpeedometerPhoto(null);
+        } else {
+          setPhoto(null);
+          const nextTries = speedometerFailedTries + 1;
+          setSpeedometerFailedTries(nextTries);
+          setLastSpeedometerPhoto(capturedUri);
+          setSpeedometerCheckError('No numbers found in the photo. Take a clear photo showing the speedometer numbers.');
+        }
+      } catch (err) {
+        // Technical failure must never block
+        setPhoto(capturedUri);
+        setSpeedometerCheckError('');
+        setSpeedometerFailedTries(0);
+        setLastSpeedometerPhoto(null);
+      } finally {
+        setCheckingPhoto(false);
+      }
+    }
+  };
+
+  const useAnyway = () => {
+    if (lastSpeedometerPhoto) {
+      setPhoto(lastSpeedometerPhoto);
+      setSpeedometerCheckError('');
+      setSpeedometerFailedTries(0);
+      setLastSpeedometerPhoto(null);
     }
   };
 
@@ -466,14 +505,14 @@ export default function CompleteScreen({ route, navigation }) {
       try {
         sAddr = await getReadableAddress(startLocation);
         startAddressRef.current = sAddr || '';
-      } catch (e) {}
+      } catch (e) { }
     }
     let eAddr = endAddressRef.current;
     if (!eAddr && (endLocation || end)) {
       try {
         eAddr = await getReadableAddress(endLocation || end);
         endAddressRef.current = eAddr || '';
-      } catch (e) {}
+      } catch (e) { }
     }
     sAddr = sAddr || '';
     eAddr = eAddr || '';
@@ -492,7 +531,7 @@ export default function CompleteScreen({ route, navigation }) {
       try {
         // nlpDetails summarization — graceful no-op if summarize is unavailable
         nlpDetailsStr = '';
-      } catch (_e) {}
+      } catch (_e) { }
 
       if (!needsEndPhoto && !activeVoiceUri) {
         // WALK / OTHER without voice: JSON finish endpoint
@@ -627,246 +666,267 @@ export default function CompleteScreen({ route, navigation }) {
       style={styles.keyboardAvoid}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
-    <ScrollView
-      ref={scrollViewRef}
-      style={styles.container}
-      contentContainerStyle={{ padding: 20, paddingBottom: 120 }}
-      keyboardShouldPersistTaps="handled"
-      keyboardDismissMode="on-drag"
-    >
-      {/* ── HEADER ─────────────────────────────────────────────────────── */}
-      <View style={styles.header}>
-        <Text style={styles.title}>Recovery Completion</Text>
-        <Text style={styles.subtitle}>Review session summary and submit your visit outcome</Text>
-      </View>
+      <ScrollView
+        ref={scrollViewRef}
+        style={styles.container}
+        contentContainerStyle={{ padding: 20, paddingBottom: 120 }}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+      >
+        {/* ── HEADER ─────────────────────────────────────────────────────── */}
+        <View style={styles.header}>
+          <Text style={styles.title}>Recovery Completion</Text>
+          <Text style={styles.subtitle}>Review session summary and submit your visit outcome</Text>
+        </View>
 
-      {/* ── TRIP SUMMARY CARD ──────────────────────────────────────────── */}
-      <View style={styles.summaryCard}>
-        <View style={styles.summaryCardHeader}>
-          <Text style={styles.summaryCardTitle}>TRIP SUMMARY</Text>
-          <View style={[styles.modePill, { backgroundColor: modeColor + '18', borderColor: modeColor + '55' }]}>
-            <Ionicons name={modeIcon} size={13} color={modeColor} style={{ marginRight: 4 }} />
-            <Text style={[styles.modePillText, { color: modeColor }]}>{rawMode}</Text>
+        {/* ── TRIP SUMMARY CARD ──────────────────────────────────────────── */}
+        <View style={styles.summaryCard}>
+          <View style={styles.summaryCardHeader}>
+            <Text style={styles.summaryCardTitle}>TRIP SUMMARY</Text>
+            <View style={[styles.modePill, { backgroundColor: modeColor + '18', borderColor: modeColor + '55' }]}>
+              <Ionicons name={modeIcon} size={13} color={modeColor} style={{ marginRight: 4 }} />
+              <Text style={[styles.modePillText, { color: modeColor }]}>{rawMode}</Text>
+            </View>
+          </View>
+
+          <View style={styles.metricsRow}>
+            <View style={styles.metricBox}>
+              <Ionicons name="time-outline" size={20} color="#2563EB" />
+              <Text style={styles.metricValue}>{formatDuration(durationSeconds)}</Text>
+              <Text style={styles.metricLabel}>Duration</Text>
+            </View>
+            <View style={styles.metricDivider} />
+            <View style={styles.metricBox}>
+              <Ionicons name="navigate-outline" size={20} color="#059669" />
+              <Text style={styles.metricValue}>{formatDistance(dist)}</Text>
+              <Text style={styles.metricLabel}>Distance</Text>
+            </View>
+            {vehicleNumber ? (
+              <>
+                <View style={styles.metricDivider} />
+                <View style={styles.metricBox}>
+                  <Ionicons name="car-outline" size={20} color="#7C3AED" />
+                  <Text style={[styles.metricValue, { fontSize: 13 }]}>{vehicleNumber}</Text>
+                  <Text style={styles.metricLabel}>Vehicle</Text>
+                </View>
+              </>
+            ) : null}
+          </View>
+
+          <View style={styles.divider} />
+
+          <View style={styles.locationRow}>
+            <View style={[styles.locationDot, { backgroundColor: '#059669' }]} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.locLabel}>Start Location</Text>
+              <Text style={styles.locValue} numberOfLines={2}>{startText}</Text>
+            </View>
+          </View>
+          <View style={styles.locationConnector} />
+          <View style={styles.locationRow}>
+            <View style={[styles.locationDot, { backgroundColor: '#DC2626' }]} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.locLabel}>End Location</Text>
+              <Text style={styles.locValue} numberOfLines={2}>{endText}</Text>
+            </View>
           </View>
         </View>
 
-        <View style={styles.metricsRow}>
-          <View style={styles.metricBox}>
-            <Ionicons name="time-outline" size={20} color="#2563EB" />
-            <Text style={styles.metricValue}>{formatDuration(durationSeconds)}</Text>
-            <Text style={styles.metricLabel}>Duration</Text>
+        {/* ── ENDING SPEEDOMETER (BIKE/CAR ONLY) ────────────────────────── */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>
+            {needsEndPhoto ? '1. Ending Speedometer Image *' : '1. Ending Speedometer Image'}
+          </Text>
+          {!needsEndPhoto ? (
+            <View style={styles.naCard}>
+              <Ionicons name="checkmark-circle" size={20} color="#059669" style={{ marginRight: 8 }} />
+              <Text style={styles.naText}>
+                Not required for {rawMode === 'WALK' ? 'Walking' : 'Other'} mode
+              </Text>
+            </View>
+          ) : checkingPhoto ? (
+            <View style={styles.checkingBox}>
+              <ActivityIndicator size="small" color="#2563EB" />
+              <Text style={styles.checkingText}>Checking photo...</Text>
+            </View>
+          ) : photo ? (
+            <View style={styles.previewBox}>
+              <Image source={{ uri: photo }} style={styles.previewImage} resizeMode="cover" />
+              <TouchableOpacity style={styles.retakeBtn} onPress={takeEndingPhoto}>
+                <Ionicons name="camera-reverse-outline" size={16} color="#2563EB" style={{ marginRight: 6 }} />
+                <Text style={styles.retakeBtnText}>Retake Photo</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <View>
+              {speedometerCheckError ? (
+                <View style={styles.speedometerErrorBox}>
+                  <Ionicons name="alert-circle-outline" size={18} color="#DC2626" style={{ marginRight: 8, marginTop: 1 }} />
+                  <Text style={styles.speedometerErrorText}>{speedometerCheckError}</Text>
+                </View>
+              ) : null}
+
+              {speedometerFailedTries >= 3 && lastSpeedometerPhoto ? (
+                <TouchableOpacity style={styles.useAnywayBtn} onPress={useAnyway} activeOpacity={0.85}>
+                  <Ionicons name="checkmark-circle-outline" size={18} color="#15803D" style={{ marginRight: 6 }} />
+                  <Text style={styles.useAnywayBtnText}>Use this photo anyway</Text>
+                </TouchableOpacity>
+              ) : null}
+
+              <TouchableOpacity style={styles.cameraBtn} onPress={takeEndingPhoto} activeOpacity={0.85}>
+                <View style={styles.cameraIconBox}>
+                  <Ionicons name="camera" size={32} color="#2563EB" />
+                </View>
+                <Text style={styles.cameraBtnTitle}>Capture Ending Speedometer</Text>
+                <Text style={styles.cameraBtnSub}>Camera only · One photo required</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>
+
+        {/* ── CUSTOMER VISITED / NOT VISITED ─────────────────────────────── */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>2. Customer Visit Outcome *</Text>
+
+          {/* Option buttons */}
+          <View style={styles.metRow}>
+            <TouchableOpacity
+              style={[styles.metBtn, customerMet === true && styles.metBtnActive]}
+              onPress={() => { setCustomerMet(true); }}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="checkmark-circle-outline" size={18}
+                color={customerMet === true ? '#059669' : '#64748B'} style={{ marginRight: 6 }} />
+              <Text style={[styles.metBtnText, customerMet === true && { color: '#059669' }]}>
+                Visited the customer
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.metBtn, customerMet === false && styles.metBtnNotActive]}
+              onPress={() => { setCustomerMet(false); }}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="close-circle-outline" size={18}
+                color={customerMet === false ? '#DC2626' : '#64748B'} style={{ marginRight: 6 }} />
+              <Text style={[styles.metBtnText, customerMet === false && { color: '#DC2626' }]}>
+                Not visited the customer
+              </Text>
+            </TouchableOpacity>
           </View>
-          <View style={styles.metricDivider} />
-          <View style={styles.metricBox}>
-            <Ionicons name="navigate-outline" size={20} color="#059669" />
-            <Text style={styles.metricValue}>{formatDistance(dist)}</Text>
-            <Text style={styles.metricLabel}>Distance</Text>
-          </View>
-          {vehicleNumber ? (
-            <>
-              <View style={styles.metricDivider} />
-              <View style={styles.metricBox}>
-                <Ionicons name="car-outline" size={20} color="#7C3AED" />
-                <Text style={[styles.metricValue, { fontSize: 13 }]}>{vehicleNumber}</Text>
-                <Text style={styles.metricLabel}>Vehicle</Text>
-              </View>
-            </>
+
+          {/* ── VISITED: Names + voice ──────────────────────────────────────── */}
+          {customerMet === true ? (
+            <View style={styles.outcomeSub}>
+              <Text style={styles.subLabel}>Names of persons visited *</Text>
+              {visitedNames.map((name, idx) => (
+                <View key={idx} style={styles.nameRow}>
+                  <TextInput
+                    style={styles.nameInput}
+                    placeholder={`Person ${idx + 1} name`}
+                    placeholderTextColor="#94A3B8"
+                    value={name}
+                    onChangeText={(v) => setVisitedName(idx, v)}
+                    autoCorrect={false}
+                  />
+                  {visitedNames.length > 1 ? (
+                    <TouchableOpacity onPress={() => removeVisitedName(idx)} style={styles.removeNameBtn}>
+                      <Ionicons name="close-circle" size={20} color="#94A3B8" />
+                    </TouchableOpacity>
+                  ) : null}
+                </View>
+              ))}
+              {visitedNames.length < 5 ? (
+                <TouchableOpacity style={styles.addNameBtn} onPress={addAnotherName} activeOpacity={0.7}>
+                  <Ionicons name="add-circle-outline" size={16} color="#2563EB" style={{ marginRight: 6 }} />
+                  <Text style={styles.addNameBtnText}>+ Add another name</Text>
+                </TouchableOpacity>
+              ) : null}
+
+              <Text style={[styles.subLabel, { marginTop: 14 }]}>Voice note (optional)</Text>
+              <VoiceRecorder
+                onRecorded={(uri, dur) => { setVoiceUri(uri); setVoiceDuration(dur); }}
+                onCleared={() => { setVoiceUri(null); setVoiceDuration(0); }}
+              />
+            </View>
+          ) : null}
+
+          {/* ── NOT VISITED: Voice or typed reason ─────────────────────────── */}
+          {customerMet === false ? (
+            <View style={styles.outcomeSub}>
+              <Text style={styles.subLabel}>Reason for not visiting *</Text>
+              {!showTypedReason ? (
+                <>
+                  <VoiceRecorder
+                    onRecorded={(uri, dur) => { setNotMetVoiceUri(uri); setNotMetVoiceDuration(dur); }}
+                    onCleared={() => { setNotMetVoiceUri(null); setNotMetVoiceDuration(0); }}
+                  />
+                  <TouchableOpacity
+                    style={styles.typeInsteadLink}
+                    onPress={() => setShowTypedReason(true)}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={styles.typeInsteadText}>Type a reason instead</Text>
+                  </TouchableOpacity>
+                </>
+              ) : (
+                <>
+                  <TextInput
+                    style={styles.textArea}
+                    placeholder="Enter reason for not visiting..."
+                    placeholderTextColor="#94A3B8"
+                    multiline
+                    numberOfLines={4}
+                    value={notMetReason}
+                    onChangeText={setNotMetReason}
+                    textAlignVertical="top"
+                  />
+                  <TouchableOpacity
+                    style={styles.typeInsteadLink}
+                    onPress={() => setShowTypedReason(false)}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={styles.typeInsteadText}>Record voice note instead</Text>
+                  </TouchableOpacity>
+                </>
+              )}
+            </View>
           ) : null}
         </View>
 
-        <View style={styles.divider} />
-
-        <View style={styles.locationRow}>
-          <View style={[styles.locationDot, { backgroundColor: '#059669' }]} />
-          <View style={{ flex: 1 }}>
-            <Text style={styles.locLabel}>Start Location</Text>
-            <Text style={styles.locValue} numberOfLines={2}>{startText}</Text>
-          </View>
-        </View>
-        <View style={styles.locationConnector} />
-        <View style={styles.locationRow}>
-          <View style={[styles.locationDot, { backgroundColor: '#DC2626' }]} />
-          <View style={{ flex: 1 }}>
-            <Text style={styles.locLabel}>End Location</Text>
-            <Text style={styles.locValue} numberOfLines={2}>{endText}</Text>
-          </View>
-        </View>
-      </View>
-
-      {/* ── ENDING SPEEDOMETER (BIKE/CAR ONLY) ────────────────────────── */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>
-          {needsEndPhoto ? '1. Ending Speedometer Image *' : '1. Ending Speedometer Image'}
-        </Text>
-        {!needsEndPhoto ? (
-          <View style={styles.naCard}>
-            <Ionicons name="checkmark-circle" size={20} color="#059669" style={{ marginRight: 8 }} />
-            <Text style={styles.naText}>
-              Not required for {rawMode === 'WALK' ? 'Walking' : 'Other'} mode
-            </Text>
-          </View>
-        ) : photo ? (
-          <View style={styles.previewBox}>
-            <Image source={{ uri: photo }} style={styles.previewImage} resizeMode="cover" />
-            <TouchableOpacity style={styles.retakeBtn} onPress={takeEndingPhoto}>
-              <Ionicons name="camera-reverse-outline" size={16} color="#2563EB" style={{ marginRight: 6 }} />
-              <Text style={styles.retakeBtnText}>Retake Photo</Text>
-            </TouchableOpacity>
-          </View>
-        ) : (
-          <TouchableOpacity style={styles.cameraBtn} onPress={takeEndingPhoto} activeOpacity={0.85}>
-            <View style={styles.cameraIconBox}>
-              <Ionicons name="camera" size={32} color="#2563EB" />
-            </View>
-            <Text style={styles.cameraBtnTitle}>Capture Ending Speedometer</Text>
-            <Text style={styles.cameraBtnSub}>Camera only · One photo required</Text>
-          </TouchableOpacity>
-        )}
-      </View>
-
-      {/* ── CUSTOMER VISITED / NOT VISITED ─────────────────────────────── */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>2. Customer Visit Outcome *</Text>
-
-        {/* Option buttons */}
-        <View style={styles.metRow}>
+        {/* ── END RECOVERY BUTTON ──────────────────────────────────────────── */}
+        <View style={styles.actionSection}>
           <TouchableOpacity
-            style={[styles.metBtn, customerMet === true && styles.metBtnActive]}
-            onPress={() => { setCustomerMet(true); }}
-            activeOpacity={0.8}
+            style={[styles.completeBtn, !canEndRecovery && styles.btnDisabled]}
+            onPress={completeRecovery}
+            disabled={!canEndRecovery || submitting}
+            activeOpacity={0.85}
           >
-            <Ionicons name="checkmark-circle-outline" size={18}
-              color={customerMet === true ? '#059669' : '#64748B'} style={{ marginRight: 6 }} />
-            <Text style={[styles.metBtnText, customerMet === true && { color: '#059669' }]}>
-              Visited the customer
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.metBtn, customerMet === false && styles.metBtnNotActive]}
-            onPress={() => { setCustomerMet(false); }}
-            activeOpacity={0.8}
-          >
-            <Ionicons name="close-circle-outline" size={18}
-              color={customerMet === false ? '#DC2626' : '#64748B'} style={{ marginRight: 6 }} />
-            <Text style={[styles.metBtnText, customerMet === false && { color: '#DC2626' }]}>
-              Not visited the customer
-            </Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* ── VISITED: Names + voice ──────────────────────────────────────── */}
-        {customerMet === true ? (
-          <View style={styles.outcomeSub}>
-            <Text style={styles.subLabel}>Names of persons visited *</Text>
-            {visitedNames.map((name, idx) => (
-              <View key={idx} style={styles.nameRow}>
-                <TextInput
-                  style={styles.nameInput}
-                  placeholder={`Person ${idx + 1} name`}
-                  placeholderTextColor="#94A3B8"
-                  value={name}
-                  onChangeText={(v) => setVisitedName(idx, v)}
-                  autoCorrect={false}
-                />
-                {visitedNames.length > 1 ? (
-                  <TouchableOpacity onPress={() => removeVisitedName(idx)} style={styles.removeNameBtn}>
-                    <Ionicons name="close-circle" size={20} color="#94A3B8" />
-                  </TouchableOpacity>
-                ) : null}
-              </View>
-            ))}
-            {visitedNames.length < 5 ? (
-              <TouchableOpacity style={styles.addNameBtn} onPress={addAnotherName} activeOpacity={0.7}>
-                <Ionicons name="add-circle-outline" size={16} color="#2563EB" style={{ marginRight: 6 }} />
-                <Text style={styles.addNameBtnText}>+ Add another name</Text>
-              </TouchableOpacity>
-            ) : null}
-
-            <Text style={[styles.subLabel, { marginTop: 14 }]}>Voice note (optional)</Text>
-            <VoiceRecorder
-              onRecorded={(uri, dur) => { setVoiceUri(uri); setVoiceDuration(dur); }}
-              onCleared={() => { setVoiceUri(null); setVoiceDuration(0); }}
-            />
-          </View>
-        ) : null}
-
-        {/* ── NOT VISITED: Voice or typed reason ─────────────────────────── */}
-        {customerMet === false ? (
-          <View style={styles.outcomeSub}>
-            <Text style={styles.subLabel}>Reason for not visiting *</Text>
-            {!showTypedReason ? (
-              <>
-                <VoiceRecorder
-                  onRecorded={(uri, dur) => { setNotMetVoiceUri(uri); setNotMetVoiceDuration(dur); }}
-                  onCleared={() => { setNotMetVoiceUri(null); setNotMetVoiceDuration(0); }}
-                />
-                <TouchableOpacity
-                  style={styles.typeInsteadLink}
-                  onPress={() => setShowTypedReason(true)}
-                  activeOpacity={0.7}
-                >
-                  <Text style={styles.typeInsteadText}>Type a reason instead</Text>
-                </TouchableOpacity>
-              </>
+            {submitting ? (
+              <ActivityIndicator color="#FFFFFF" />
             ) : (
-              <>
-                <TextInput
-                  style={styles.textArea}
-                  placeholder="Enter reason for not visiting..."
-                  placeholderTextColor="#94A3B8"
-                  multiline
-                  numberOfLines={4}
-                  value={notMetReason}
-                  onChangeText={setNotMetReason}
-                  textAlignVertical="top"
-                />
-                <TouchableOpacity
-                  style={styles.typeInsteadLink}
-                  onPress={() => setShowTypedReason(false)}
-                  activeOpacity={0.7}
-                >
-                  <Text style={styles.typeInsteadText}>Record voice note instead</Text>
-                </TouchableOpacity>
-              </>
+              <View style={styles.completeBtnContent}>
+                <Ionicons name="checkmark-done-circle" size={22} color="#FFFFFF" style={{ marginRight: 8 }} />
+                <Text style={styles.completeBtnText}>END RECOVERY</Text>
+              </View>
             )}
-          </View>
-        ) : null}
-      </View>
+          </TouchableOpacity>
 
-      {/* ── END RECOVERY BUTTON ──────────────────────────────────────────── */}
-      <View style={styles.actionSection}>
-        <TouchableOpacity
-          style={[styles.completeBtn, !canEndRecovery && styles.btnDisabled]}
-          onPress={completeRecovery}
-          disabled={!canEndRecovery || submitting}
-          activeOpacity={0.85}
-        >
-          {submitting ? (
-            <ActivityIndicator color="#FFFFFF" />
-          ) : (
-            <View style={styles.completeBtnContent}>
-              <Ionicons name="checkmark-done-circle" size={22} color="#FFFFFF" style={{ marginRight: 8 }} />
-              <Text style={styles.completeBtnText}>END RECOVERY</Text>
-            </View>
-          )}
-        </TouchableOpacity>
-
-        {!canEndRecovery ? (
-          <Text style={styles.validationNote}>
-            {customerMet === null
-              ? 'Select Visited or Not visited to proceed'
-              : needsEndPhoto && !photo
-              ? 'Capture ending speedometer photo to proceed'
-              : customerMet === true && visitedNames.filter((n) => n.trim()).length === 0
-              ? 'Enter at least one name to proceed'
-              : customerMet === false && !notMetVoiceUri && !notMetReason.trim()
-              ? 'Record a voice note or type a reason to proceed'
-              : ''}
-          </Text>
-        ) : null}
-      </View>
-    </ScrollView>
+          {!canEndRecovery ? (
+            <Text style={styles.validationNote}>
+              {customerMet === null
+                ? 'Select Visited or Not visited to proceed'
+                : needsEndPhoto && !photo
+                  ? 'Capture ending speedometer photo to proceed'
+                  : customerMet === true && visitedNames.filter((n) => n.trim()).length === 0
+                    ? 'Enter at least one name to proceed'
+                    : customerMet === false && !notMetVoiceUri && !notMetReason.trim()
+                      ? 'Record a voice note or type a reason to proceed'
+                      : ''}
+            </Text>
+          ) : null}
+        </View>
+      </ScrollView>
     </KeyboardAvoidingView>
   );
 }
@@ -940,6 +1000,25 @@ const styles = StyleSheet.create({
     backgroundColor: '#EFF6FF', borderRadius: 8, borderWidth: 1, borderColor: '#BFDBFE',
   },
   retakeBtnText: { color: '#2563EB', fontSize: 13, fontWeight: '700' },
+
+  checkingBox: {
+    backgroundColor: '#EFF6FF', borderRadius: 14, padding: 24,
+    alignItems: 'center', justifyContent: 'center', borderWidth: 1.5,
+    borderColor: '#BFDBFE', flexDirection: 'row',
+  },
+  checkingText: { fontSize: 14, fontWeight: '600', color: '#2563EB', marginLeft: 8 },
+  speedometerErrorBox: {
+    flexDirection: 'row', alignItems: 'flex-start',
+    backgroundColor: '#FEF2F2', padding: 12, borderRadius: 10,
+    marginBottom: 12, borderWidth: 1, borderColor: '#FCA5A5',
+  },
+  speedometerErrorText: { color: '#DC2626', fontSize: 13, fontWeight: '500', flex: 1, lineHeight: 18 },
+  useAnywayBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    backgroundColor: '#F0FDF4', borderWidth: 1.5, borderColor: '#86EFAC',
+    borderRadius: 12, paddingVertical: 12, paddingHorizontal: 16, marginBottom: 12,
+  },
+  useAnywayBtnText: { color: '#15803D', fontSize: 14, fontWeight: '700' },
 
   // Customer visited buttons
   metRow: { gap: 10, marginBottom: 14 },
