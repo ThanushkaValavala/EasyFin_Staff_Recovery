@@ -278,7 +278,7 @@ export default function LoginScreen({ navigation }) {
     );
   }
 
-  // ─── OTP step ───────────────────────────────────────────────────────────────
+  // ─── PHONE step ─────────────────────────────────────────────────────────────
   return (
     <SafeAreaView style={styles.safeArea}>
       <KeyboardAvoidingView
@@ -399,10 +399,10 @@ export default function LoginScreen({ navigation }) {
             <TouchableOpacity
               style={[
                 styles.primaryBtn,
-                (loading || !branch || phone.trim().length !== 10) && styles.btnDisabled,
+                (!branch || phone.length !== 10) && styles.btnDisabled,
               ]}
               onPress={requestOtp}
-              disabled={loading || !branch || phone.trim().length !== 10}
+              disabled={loading || !branch || phone.length !== 10}
             >
               {loading ? (
                 <ActivityIndicator color="#fff" />

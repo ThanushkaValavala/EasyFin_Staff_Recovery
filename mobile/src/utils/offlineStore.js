@@ -101,16 +101,20 @@ export async function getPendingSessions() {
  * Prevents multiple simultaneous sync runs.
  *
  * For WALK / OTHER:
- *   - Synchronizes metadata and GPS points via POST /recovery/sync (no photo).
+ *   - If a voice note is present, uploads via POST /recovery/sync (multipart).
+ *   - Otherwise synchronizes metadata and GPS points via POST /recovery/sync (JSON).
  *
  * For BIKE / CAR:
  *   - If started online (has real backend sessionId), uploads ending photo via
  *     POST /recovery/sessions/:sessionId/finish and GPS points via points endpoint.
+ *     Voice note (if present) is included in the same multipart upload.
  *   - If started offline (full offline session), uploads BOTH startPhoto and endPhoto
  *     plus all metadata and GPS points via POST /recovery/sync (multipart).
+ *     Voice note (if present) is included in the same multipart upload.
  *   - Retains session in queue if either required photo is missing.
  *
  * Each session is removed from the local queue ONLY after verified server success.
+ * The local voice file is never deleted until the server confirms the upload.
  * Returns { synced, failed, inProgress }.
  */
 export async function syncPendingSessions() {
@@ -157,39 +161,55 @@ export async function syncPendingSessions() {
 
         if (needsPhotos) {
           // If session was started online: start photo is already on server.
-          // Only the end photo needs to be uploaded to finish the session.
+          // Only the end photo (and optional voice) need to be uploaded to finish.
           if (hasBackendSession && session.endPhotoUri) {
             console.log('[offlineStore] Syncing online-started Bike/Car session with end photo:', session.sessionId);
             const endLoc = session.endLocation || {};
-            const onlineFields = {
-              remarks: session.remarks || session.rawRemarks || '',
-              customerMet: session.customerMet != null ? String(session.customerMet) : '',
-              customerNames: JSON.stringify(session.customerNames || []),
-              metAt: session.metAt || '',
-              notMetReason: session.notMetReason || '',
-              distanceMeters: String(Math.round(session.distanceMeters || 0)),
-              durationSeconds: String(Math.round(session.durationSeconds || 0)),
-              movingSeconds: session.movingSeconds != null ? String(Math.round(session.movingSeconds)) : '',
-              idleSeconds: session.idleSeconds != null ? String(Math.round(session.idleSeconds)) : '',
-              unknownSeconds: session.unknownSeconds != null ? String(Math.round(session.unknownSeconds)) : '',
-              startAddress,
-              endAddress,
-              endLocation: JSON.stringify({
-                latitude: endLoc.latitude || 0,
-                longitude: endLoc.longitude || 0,
-                accuracy: endLoc.accuracy || 0,
-              }),
-              nlpDetails: session.nlpDetails || '',
-              voiceDurationSeconds: session.voiceUri ? String(session.voiceDurationSeconds || 0) : '',
-            };
-            const onlineFilesMap = {};
-            if (session.endPhotoUri) onlineFilesMap.endPhoto = session.endPhotoUri;
-            if (session.voiceUri) onlineFilesMap.voice = session.voiceUri;
-            await apiUploadFiles(
-              `/recovery/sessions/${session.sessionId}/finish`,
-              onlineFields,
-              onlineFilesMap
-            );
+            const onlineFinishMeta = (() => {
+              const base = {
+                distanceMeters: String(Math.round(session.distanceMeters || 0)),
+                durationSeconds: String(Math.round(session.durationSeconds || 0)),
+                movingSeconds: session.movingSeconds != null ? String(Math.round(session.movingSeconds)) : '',
+                idleSeconds: session.idleSeconds != null ? String(Math.round(session.idleSeconds)) : '',
+                unknownSeconds: session.unknownSeconds != null ? String(Math.round(session.unknownSeconds)) : '',
+                startAddress,
+                endAddress,
+                endLocation: JSON.stringify({
+                  latitude: endLoc.latitude || 0,
+                  longitude: endLoc.longitude || 0,
+                  accuracy: endLoc.accuracy || 0,
+                }),
+                remarks: session.remarks || session.rawRemarks || '',
+                nlpDetails: session.nlpDetails || '',
+                voiceDurationSeconds: session.voiceUri ? String(session.voiceDurationSeconds || 0) : '',
+              };
+              if (session.customerMet === true) {
+                base.customerMet = 'true';
+                base.customerNames = JSON.stringify(Array.isArray(session.customerNames) ? session.customerNames : []);
+                if (session.metAt) base.metAt = session.metAt;
+              } else if (session.customerMet === false) {
+                base.customerMet = 'false';
+                if (session.notMetReason) base.notMetReason = session.notMetReason;
+              }
+              return base;
+            })();
+
+            if (session.voiceUri) {
+              // Include voice in the same multipart upload; never delete locally until confirmed
+              const onlineFilesMap = { endPhoto: session.endPhotoUri, voice: session.voiceUri };
+              await apiUploadFiles(
+                `/recovery/sessions/${session.sessionId}/finish`,
+                onlineFinishMeta,
+                onlineFilesMap
+              );
+            } else {
+              await apiUploadFile(
+                `/recovery/sessions/${session.sessionId}/finish`,
+                onlineFinishMeta,
+                'endPhoto',
+                session.endPhotoUri
+              );
+            }
 
             // Flush points if any were captured locally
             if (Array.isArray(session.points) && session.points.length > 0) {
@@ -218,9 +238,8 @@ export async function syncPendingSessions() {
           }
 
           console.log('[offlineStore] Syncing full offline Bike/Car recovery with both photos:', session.deviceSessionId);
-          await apiUploadFiles(
-            '/recovery/sync',
-            {
+          const bikeCarSyncMeta = (() => {
+            const base = {
               deviceSessionId: session.deviceSessionId,
               sessionId: session.sessionId,
               vehicleType: mode,
@@ -235,16 +254,25 @@ export async function syncPendingSessions() {
               startAddress,
               endAddress,
               remarks: session.remarks || session.rawRemarks || '',
-              customerMet: session.customerMet != null ? String(session.customerMet) : '',
-              customerNames: JSON.stringify(session.customerNames || []),
-              metAt: session.metAt || '',
-              notMetReason: session.notMetReason || '',
+              nlpDetails: session.nlpDetails || '',
+              voiceDurationSeconds: session.voiceUri ? String(session.voiceDurationSeconds || 0) : '',
               startLocation: JSON.stringify(session.startLocation || null),
               endLocation: JSON.stringify(session.endLocation || null),
               points: JSON.stringify(session.points || []),
-              nlpDetails: session.nlpDetails || '',
-              voiceDurationSeconds: session.voiceUri ? String(session.voiceDurationSeconds || 0) : '',
-            },
+            };
+            if (session.customerMet === true) {
+              base.customerMet = 'true';
+              base.customerNames = JSON.stringify(Array.isArray(session.customerNames) ? session.customerNames : []);
+              if (session.metAt) base.metAt = session.metAt;
+            } else if (session.customerMet === false) {
+              base.customerMet = 'false';
+              if (session.notMetReason) base.notMetReason = session.notMetReason;
+            }
+            return base;
+          })();
+          await apiUploadFiles(
+            '/recovery/sync',
+            bikeCarSyncMeta,
             {
               startPhoto: session.startPhotoUri,
               endPhoto: session.endPhotoUri,
@@ -258,6 +286,7 @@ export async function syncPendingSessions() {
           // WALK or OTHER: sync — with voice if present, otherwise plain JSON
           console.log(`[offlineStore] Syncing ${mode} session (no photo required):`, session.deviceSessionId);
           if (session.voiceUri) {
+            // Never delete local voice file until server confirms; upload together with metadata
             await apiUploadFiles('/recovery/sync', {
               ...(() => {
                 const { voiceUri: _v, startPhotoUri: _sp, endPhotoUri: _ep, ...rest } = session;
@@ -279,7 +308,7 @@ export async function syncPendingSessions() {
               endLocation: JSON.stringify(session.endLocation || null),
             }, { voice: session.voiceUri });
           } else {
-            await apiPost('/recovery/sync', {
+            const walkSyncPayload = {
               ...session,
               vehicleType: mode,
               movingSeconds: session.movingSeconds != null ? Math.round(session.movingSeconds) : null,
@@ -288,7 +317,17 @@ export async function syncPendingSessions() {
               startAddress,
               endAddress,
               points: session.points || [],
-            });
+            };
+            // Always forward customer-met fields if present (undefined fields are ignored by JSON.stringify)
+            if (session.customerMet === true) {
+              walkSyncPayload.customerMet = true;
+              walkSyncPayload.customerNames = Array.isArray(session.customerNames) ? session.customerNames : [];
+              if (session.metAt) walkSyncPayload.metAt = session.metAt;
+            } else if (session.customerMet === false) {
+              walkSyncPayload.customerMet = false;
+              if (session.notMetReason) walkSyncPayload.notMetReason = session.notMetReason;
+            }
+            await apiPost('/recovery/sync', walkSyncPayload);
           }
 
           console.log(`[offlineStore] Confirmed sync for ${mode} session:`, session.deviceSessionId);

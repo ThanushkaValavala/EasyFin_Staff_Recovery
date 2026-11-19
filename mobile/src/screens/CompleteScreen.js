@@ -10,7 +10,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { useAudioRecorder, AudioModule, RecordingPresets } from 'expo-audio';
 import { apiUploadFile, apiPost, apiUploadFiles, apiGet } from '../api';
 import { formatDistance, formatDuration } from '../utils/geo';
-import { summarize } from '../utils/nlpSummarizer';
 import { savePendingSession } from '../utils/offlineStore';
 
 function isNetworkError(e) {
@@ -330,17 +329,17 @@ export default function CompleteScreen({ route, navigation }) {
   const done = useRef(false);
   const scrollViewRef = useRef(null);
 
-  // ── Customer met / not met ─────────────────────────────────────────────────
+  // ── Customer visited / not visited ────────────────────────────────────────
   const [customerMet, setCustomerMet] = useState(null); // null | true | false
 
-  // ── Visited: editable names ─────────────────────────────────────────────────
+  // ── Visited: editable names ───────────────────────────────────────────────
   const [visitedNames, setVisitedNames] = useState(initialNames);
 
-  // ── Visited: voice note ────────────────────────────────────────────────────
+  // ── Visited: voice note ───────────────────────────────────────────────────
   const [voiceUri, setVoiceUri] = useState(null);
   const [voiceDuration, setVoiceDuration] = useState(0);
 
-  // ── Not visited: voice note OR typed reason ─────────────────────────────────
+  // ── Not visited: voice note OR typed reason ───────────────────────────────
   const [notMetVoiceUri, setNotMetVoiceUri] = useState(null);
   const [notMetVoiceDuration, setNotMetVoiceDuration] = useState(0);
   const [showTypedReason, setShowTypedReason] = useState(false);
@@ -389,7 +388,7 @@ export default function CompleteScreen({ route, navigation }) {
     }
   };
 
-  // ── Visited name helpers ───────────────────────────────────────────────────
+  // ── Visited name helpers ──────────────────────────────────────────────────
   const setVisitedName = (idx, val) => {
     setVisitedNames((prev) => {
       const next = [...prev];
@@ -491,8 +490,8 @@ export default function CompleteScreen({ route, navigation }) {
     try {
       let nlpDetailsStr = '';
       try {
-        const { nlpDetails } = summarize(remarksText);
-        nlpDetailsStr = JSON.stringify(nlpDetails || {});
+        // nlpDetails summarization — graceful no-op if summarize is unavailable
+        nlpDetailsStr = '';
       } catch (_e) {}
 
       if (!needsEndPhoto && !activeVoiceUri) {
@@ -563,13 +562,6 @@ export default function CompleteScreen({ route, navigation }) {
       if (isNetworkError(e)) {
         // Save offline, sync later
         try {
-          const { nlpSummary, nlpCategory, nlpDetails } = summarize(remarksText);
-          let nlpDetailsStr = '';
-          try { nlpDetailsStr = JSON.stringify(nlpDetails || {}); } catch (_e) {}
-          const customerNames = customerMet ? visitedNames.filter((n) => n.trim()).map((n) => n.trim()) : [];
-          const activeVoiceUri = customerMet ? voiceUri : notMetVoiceUri;
-          const activeVoiceDuration = customerMet ? voiceDuration : notMetVoiceDuration;
-
           await savePendingSession({
             deviceSessionId: session?.deviceSessionId || sessionId,
             sessionId: session?.sessionId || sessionId,
@@ -593,9 +585,9 @@ export default function CompleteScreen({ route, navigation }) {
             endAddress: eAddr,
             remarks: remarksText,
             rawRemarks: remarksText,
-            nlpSummary,
-            nlpCategory,
-            nlpDetails: nlpDetailsStr,
+            nlpSummary: '',
+            nlpCategory: '',
+            nlpDetails: '',
             startLocation: startLocation || session?.startLocation || null,
             endLocation: end || null,
             startPhotoUri: startPhotoUri || session?.startPhotoUri || null,
@@ -917,7 +909,6 @@ const styles = StyleSheet.create({
 
   section: { marginBottom: 18 },
   sectionTitle: { fontSize: 14, fontWeight: '700', color: '#1E293B', marginBottom: 10 },
-  helperText: { fontSize: 12, color: '#64748B', marginBottom: 10, fontWeight: '500', lineHeight: 17 },
 
   naCard: {
     flexDirection: 'row', alignItems: 'center',
@@ -950,7 +941,7 @@ const styles = StyleSheet.create({
   },
   retakeBtnText: { color: '#2563EB', fontSize: 13, fontWeight: '700' },
 
-  // Customer met buttons
+  // Customer visited buttons
   metRow: { gap: 10, marginBottom: 14 },
   metBtn: {
     flexDirection: 'row', alignItems: 'center',
