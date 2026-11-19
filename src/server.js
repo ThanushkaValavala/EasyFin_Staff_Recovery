@@ -1,5 +1,7 @@
 require('dotenv').config();
 const express = require('express');
+const { protect } = require('./middleware/authMiddleware');
+const places = require('./controllers/placesController');
 const cors = require('cors');
 const morgan = require('morgan');
 const path = require('path');
@@ -47,6 +49,8 @@ app.use('/api/v1/agent', agentRoutes);
 app.use('/api/v1/cases', caseRoutes);
 app.use('/api/v1/assignments', caseRoutes); // Alias for specification: GET /assignments
 app.use('/api/v1/recovery', recoveryRoutes);
+app.get('/api/v1/places/search', protect, places.searchPlaces);
+app.get('/api/v1/places/reverse', protect, places.reverseGeocode);
 app.use('/api/v1/reports', reportRoutes);
 app.use('/api/v1/analytics', analyticsRoutes);
 
