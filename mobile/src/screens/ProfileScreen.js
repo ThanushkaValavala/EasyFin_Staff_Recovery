@@ -11,6 +11,21 @@ import { apiGet } from '../api';
 import { BADGE_COLORS } from '../utils/nlpSummarizer';
 import { cacheHistory, getCachedHistory, getPendingSessions, syncPendingSessions } from '../utils/offlineStore';
 
+/** Fetch signed voice URL and play it. Errors are handled quietly. */
+async function playVoiceNote(sessionId) {
+  try {
+    const res = await apiGet(`/recovery/sessions/${sessionId}/voice-url`);
+    const url = res?.url || res?.signedUrl || res?.voiceUrl;
+    if (!url) return;
+    const { AudioPlayer } = await import('expo-audio');
+    const player = new AudioPlayer(url);
+    player.play();
+  } catch (e) {
+    // handle quietly
+    console.warn('[ProfileScreen] Voice playback error:', e.message);
+  }
+}
+
 const memoryAddressCache = new Map();
 
 const fmtDate = (d) => {
@@ -95,6 +110,35 @@ function SessionCard({ session }) {
 
   const startLoc = session.startLocation ? `${session.startLocation.latitude?.toFixed(4)}, ${session.startLocation.longitude?.toFixed(4)}` : null;
   const endLoc = session.endLocation ? `${session.endLocation.latitude?.toFixed(4)}, ${session.endLocation.longitude?.toFixed(4)}` : null;
+
+  // Customer met display
+  const hasMetField = session.customerMet != null;
+  let visitedLabel = null;
+  if (hasMetField) {
+    if (session.customerMet === true || session.customerMet === 'true') {
+      const names = Array.isArray(session.customerNames) && session.customerNames.length > 0
+        ? session.customerNames.join(', ')
+        : null;
+      visitedLabel = names ? `Visited: ${names}` : 'Visited the customer';
+    } else {
+      visitedLabel = 'Not visited';
+    }
+  }
+
+  // Voice note
+  const hasVoice = !!(session.voicePath || session.voiceUri);
+  const sessionIdForVoice = session._id || session.sessionId;
+  const [voicePlaying, setVoicePlaying] = useState(false);
+
+  const handlePlayVoice = async () => {
+    if (!sessionIdForVoice) return;
+    setVoicePlaying(true);
+    try {
+      await playVoiceNote(sessionIdForVoice);
+    } finally {
+      setVoicePlaying(false);
+    }
+  };
 
   const [lazyStartAddress, setLazyStartAddress] = useState(
     () => session.startAddress || (session.startLocation ? memoryAddressCache.get(`${session.startLocation.latitude},${session.startLocation.longitude}`) : null)
@@ -185,6 +229,41 @@ function SessionCard({ session }) {
 
       {/* NLP Summary Badge */}
       <NlpBadge category={nlpCategory} summary={nlpSummary} />
+
+      {/* Customer visited label */}
+      {visitedLabel ? (
+        <View style={styles.visitedRow}>
+          <Ionicons
+            name={session.customerMet === true || session.customerMet === 'true' ? 'checkmark-circle-outline' : 'close-circle-outline'}
+            size={14}
+            color={session.customerMet === true || session.customerMet === 'true' ? '#059669' : '#DC2626'}
+            style={{ marginRight: 6 }}
+          />
+          <Text style={[
+            styles.visitedText,
+            { color: session.customerMet === true || session.customerMet === 'true' ? '#15803D' : '#DC2626' },
+          ]}>
+            {visitedLabel}
+          </Text>
+        </View>
+      ) : null}
+
+      {/* Play voice note button */}
+      {hasVoice && sessionIdForVoice ? (
+        <TouchableOpacity
+          style={styles.playVoiceBtn}
+          onPress={handlePlayVoice}
+          disabled={voicePlaying}
+          activeOpacity={0.7}
+        >
+          {voicePlaying ? (
+            <ActivityIndicator size="small" color="#2563EB" style={{ marginRight: 6 }} />
+          ) : (
+            <Ionicons name="play-circle-outline" size={16} color="#2563EB" style={{ marginRight: 6 }} />
+          )}
+          <Text style={styles.playVoiceBtnText}>Play voice note</Text>
+        </TouchableOpacity>
+      ) : null}
 
       <View style={styles.sessionInfoGrid}>
         <InfoRow icon="time-outline" label="Start Time" value={fmtTime(session.startTime)} />
@@ -538,6 +617,18 @@ const styles = StyleSheet.create({
   },
   emptyTitle: { fontSize: 15, fontWeight: '700', color: '#334155', marginTop: 10 },
   emptySub: { fontSize: 12, color: '#64748B', textAlign: 'center', marginTop: 4 },
+  visitedRow: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: '#F8FAFC', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6,
+    borderWidth: 1, borderColor: '#E2E8F0', marginBottom: 8, alignSelf: 'flex-start',
+  },
+  visitedText: { fontSize: 12, fontWeight: '700' },
+  playVoiceBtn: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: '#EFF6FF', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6,
+    borderWidth: 1, borderColor: '#BFDBFE', marginBottom: 8, alignSelf: 'flex-start',
+  },
+  playVoiceBtnText: { fontSize: 12, fontWeight: '700', color: '#2563EB' },
   recoveriesPerDayRow: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     backgroundColor: '#FFFFFF', borderRadius: 14, padding: 16,

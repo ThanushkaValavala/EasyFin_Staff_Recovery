@@ -7,7 +7,8 @@ import {
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
 import { Ionicons } from '@expo/vector-icons';
-import { apiUploadFile, apiPost } from '../api';
+import { useAudioRecorder, AudioModule, RecordingPresets } from 'expo-audio';
+import { apiUploadFile, apiPost, apiUploadFiles, apiGet } from '../api';
 import { formatDistance, formatDuration } from '../utils/geo';
 import { summarize } from '../utils/nlpSummarizer';
 import { savePendingSession } from '../utils/offlineStore';
@@ -62,6 +63,235 @@ async function getReadableAddress(p) {
   return '';
 }
 
+/** Format seconds as mm:ss */
+function fmtRecordTime(secs) {
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+const MAX_RECORD_SECONDS = 180; // 3 minutes
+
+/**
+ * VoiceRecorder component
+ * States: idle → recording → recorded → (can re-record or play)
+ * Props:
+ *   onRecorded(uri, durationSeconds) — called when a recording is finalized
+ *   onCleared() — called when recording is cleared
+ */
+function VoiceRecorder({ onRecorded, onCleared }) {
+  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const [recorderState, setRecorderState] = useState('idle'); // idle | recording | recorded
+  const [recordedUri, setRecordedUri] = useState(null);
+  const [recordedDuration, setRecordedDuration] = useState(0);
+  const [elapsed, setElapsed] = useState(0);
+  const [permDenied, setPermDenied] = useState(false);
+  const [playerState, setPlayerState] = useState('stopped'); // stopped | playing
+  const timerRef = useRef(null);
+  const playerRef = useRef(null); // expo-audio Sound ref
+
+  // cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+      if (playerRef.current) {
+        playerRef.current.remove().catch(() => {});
+      }
+    };
+  }, []);
+
+  const startRecording = async () => {
+    // Request permission only on tap Record
+    const status = await AudioModule.requestRecordingPermissionsAsync();
+    if (!status.granted) {
+      setPermDenied(true);
+      return;
+    }
+    setPermDenied(false);
+    try {
+      await audioRecorder.prepareToRecordAsync();
+      audioRecorder.record();
+      setRecorderState('recording');
+      setElapsed(0);
+      timerRef.current = setInterval(() => {
+        setElapsed((prev) => {
+          const next = prev + 1;
+          if (next >= MAX_RECORD_SECONDS) {
+            stopRecording();
+          }
+          return next;
+        });
+      }, 1000);
+    } catch (err) {
+      Alert.alert('Recording Error', err.message || 'Could not start recording.');
+    }
+  };
+
+  const stopRecording = async () => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    try {
+      const uri = await audioRecorder.stop();
+      const dur = elapsed;
+      setRecordedUri(uri);
+      setRecordedDuration(dur);
+      setRecorderState('recorded');
+      onRecorded && onRecorded(uri, dur);
+    } catch (err) {
+      Alert.alert('Recording Error', err.message || 'Could not stop recording.');
+      setRecorderState('idle');
+    }
+  };
+
+  const reRecord = async () => {
+    // Clear previous
+    setRecordedUri(null);
+    setRecordedDuration(0);
+    setElapsed(0);
+    setRecorderState('idle');
+    setPlayerState('stopped');
+    if (playerRef.current) {
+      await playerRef.current.remove().catch(() => {});
+      playerRef.current = null;
+    }
+    onCleared && onCleared();
+  };
+
+  const playRecording = async () => {
+    if (!recordedUri) return;
+    if (playerState === 'playing') {
+      // stop playback
+      if (playerRef.current) {
+        await playerRef.current.pauseAsync().catch(() => {});
+      }
+      setPlayerState('stopped');
+      return;
+    }
+    try {
+      const { AudioPlayer } = await import('expo-audio');
+      if (playerRef.current) {
+        await playerRef.current.remove().catch(() => {});
+      }
+      const player = new AudioPlayer(recordedUri);
+      playerRef.current = player;
+      player.play();
+      setPlayerState('playing');
+      // Reset icon when done
+      player.addListener('playbackStatusUpdate', (status) => {
+        if (status.didJustFinish) {
+          setPlayerState('stopped');
+        }
+      });
+    } catch (err) {
+      Alert.alert('Playback Error', err.message || 'Could not play recording.');
+    }
+  };
+
+  if (permDenied) {
+    return (
+      <View style={recStyles.permDeniedBox}>
+        <Ionicons name="mic-off-outline" size={22} color="#DC2626" style={{ marginRight: 8 }} />
+        <Text style={recStyles.permDeniedText}>Microphone permission denied. Use the text option below.</Text>
+      </View>
+    );
+  }
+
+  if (recorderState === 'idle') {
+    return (
+      <TouchableOpacity style={recStyles.recordBtn} onPress={startRecording} activeOpacity={0.85}>
+        <Ionicons name="mic-outline" size={22} color="#FFFFFF" style={{ marginRight: 8 }} />
+        <Text style={recStyles.recordBtnText}>Record Voice Note</Text>
+      </TouchableOpacity>
+    );
+  }
+
+  if (recorderState === 'recording') {
+    return (
+      <View style={recStyles.recordingBox}>
+        <View style={recStyles.recordingIndicator}>
+          <View style={recStyles.recordingDot} />
+          <Text style={recStyles.recordingLabel}>Recording</Text>
+          <Text style={recStyles.recordingTimer}>{fmtRecordTime(elapsed)} / {fmtRecordTime(MAX_RECORD_SECONDS)}</Text>
+        </View>
+        <TouchableOpacity style={recStyles.stopBtn} onPress={stopRecording} activeOpacity={0.85}>
+          <Ionicons name="stop-circle-outline" size={22} color="#FFFFFF" style={{ marginRight: 8 }} />
+          <Text style={recStyles.stopBtnText}>Stop</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  // recorded
+  return (
+    <View style={recStyles.recordedBox}>
+      <Ionicons name="checkmark-circle" size={20} color="#059669" style={{ marginRight: 8 }} />
+      <Text style={recStyles.recordedDur}>Voice note: {fmtRecordTime(recordedDuration)}</Text>
+      <View style={recStyles.recordedActions}>
+        <TouchableOpacity style={recStyles.playBtn} onPress={playRecording} activeOpacity={0.8}>
+          <Ionicons name={playerState === 'playing' ? 'pause-outline' : 'play-outline'} size={18} color="#2563EB" />
+          <Text style={recStyles.playBtnText}>{playerState === 'playing' ? 'Pause' : 'Play'}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={recStyles.reRecordBtn} onPress={reRecord} activeOpacity={0.8}>
+          <Ionicons name="refresh-outline" size={16} color="#64748B" />
+          <Text style={recStyles.reRecordBtnText}>Re-record</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+}
+
+const recStyles = StyleSheet.create({
+  recordBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    backgroundColor: '#DC2626', borderRadius: 12, paddingVertical: 14,
+    paddingHorizontal: 20,
+  },
+  recordBtnText: { color: '#FFFFFF', fontSize: 15, fontWeight: '700' },
+  recordingBox: {
+    backgroundColor: '#FEF2F2', borderRadius: 12, padding: 14,
+    borderWidth: 1, borderColor: '#FCA5A5',
+  },
+  recordingIndicator: { flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
+  recordingDot: {
+    width: 10, height: 10, borderRadius: 5, backgroundColor: '#DC2626', marginRight: 8,
+  },
+  recordingLabel: { fontSize: 13, fontWeight: '700', color: '#DC2626', flex: 1 },
+  recordingTimer: { fontSize: 13, fontWeight: '700', color: '#7F1D1D' },
+  stopBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    backgroundColor: '#7F1D1D', borderRadius: 10, paddingVertical: 10,
+  },
+  stopBtnText: { color: '#FFFFFF', fontSize: 14, fontWeight: '700' },
+  recordedBox: {
+    flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap',
+    backgroundColor: '#F0FDF4', borderRadius: 12, padding: 12,
+    borderWidth: 1, borderColor: '#BBF7D0', gap: 8,
+  },
+  recordedDur: { fontSize: 13, fontWeight: '600', color: '#15803D', flex: 1 },
+  recordedActions: { flexDirection: 'row', gap: 10 },
+  playBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: 10, paddingVertical: 6, backgroundColor: '#EFF6FF',
+    borderRadius: 8, borderWidth: 1, borderColor: '#BFDBFE',
+  },
+  playBtnText: { fontSize: 12, color: '#2563EB', fontWeight: '700' },
+  reRecordBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: 10, paddingVertical: 6, backgroundColor: '#F8FAFC',
+    borderRadius: 8, borderWidth: 1, borderColor: '#E2E8F0',
+  },
+  reRecordBtnText: { fontSize: 12, color: '#64748B', fontWeight: '600' },
+  permDeniedBox: {
+    flexDirection: 'row', alignItems: 'center', backgroundColor: '#FEF2F2',
+    borderRadius: 10, padding: 12, borderWidth: 1, borderColor: '#FCA5A5',
+  },
+  permDeniedText: { fontSize: 13, color: '#DC2626', fontWeight: '500', flex: 1 },
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 export default function CompleteScreen({ route, navigation }) {
   const {
     session,
@@ -76,6 +306,7 @@ export default function CompleteScreen({ route, navigation }) {
     vehicleNumber,
     startPhotoUri,
     allPoints,
+    plannedNames: routePlannedNames,
   } = route.params || {};
 
   const sessionId = (session && (session.sessionId || session._id)) || `SESS-${Date.now()}`;
@@ -84,8 +315,13 @@ export default function CompleteScreen({ route, navigation }) {
   // WALK and OTHER do not require ending photo; BIKE and CAR require it
   const needsEndPhoto = rawMode === 'BIKE' || rawMode === 'CAR';
 
+  // Pre-fill names from plannedNames (up to 5 editable slots, max 5)
+  const initialNames = (() => {
+    const src = routePlannedNames || session?.plannedNames || [];
+    return src.slice(0, 5).map((n) => n || '');
+  })();
+
   const [photo, setPhoto] = useState(null);
-  const [remarks, setRemarks] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [startText, setStartText] = useState('Locating...');
   const [endText, setEndText] = useState('Locating...');
@@ -93,7 +329,23 @@ export default function CompleteScreen({ route, navigation }) {
   const endAddressRef = useRef('');
   const done = useRef(false);
   const scrollViewRef = useRef(null);
-  const remarksRef = useRef(null);
+
+  // ── Customer met / not met ─────────────────────────────────────────────────
+  const [customerMet, setCustomerMet] = useState(null); // null | true | false
+
+  // ── Visited: editable names ─────────────────────────────────────────────────
+  const [visitedNames, setVisitedNames] = useState(initialNames);
+
+  // ── Visited: voice note ────────────────────────────────────────────────────
+  const [voiceUri, setVoiceUri] = useState(null);
+  const [voiceDuration, setVoiceDuration] = useState(0);
+
+  // ── Not visited: voice note OR typed reason ─────────────────────────────────
+  const [notMetVoiceUri, setNotMetVoiceUri] = useState(null);
+  const [notMetVoiceDuration, setNotMetVoiceDuration] = useState(0);
+  const [showTypedReason, setShowTypedReason] = useState(false);
+  const [notMetReason, setNotMetReason] = useState('');
+  const [metAt, setMetAt] = useState('');
 
   useEffect(() => {
     describe(startLocation).then(setStartText);
@@ -114,8 +366,8 @@ export default function CompleteScreen({ route, navigation }) {
         Alert.alert(
           'Complete Recovery Session',
           needsEndPhoto
-            ? 'Please capture the ending speedometer photo and enter customer remarks to finish.'
-            : 'Please enter customer visit remarks to finish this recovery.'
+            ? 'Please capture the ending speedometer photo and submit your visit outcome to finish.'
+            : 'Please submit your visit outcome to finish this recovery.'
         );
       }),
     [navigation, needsEndPhoto]
@@ -137,15 +389,42 @@ export default function CompleteScreen({ route, navigation }) {
     }
   };
 
-  // Validation:
-  // ALL modes: Remarks mandatory
-  // BIKE/CAR: Ending speedometer photo mandatory
-  // WALK/OTHER: No photo needed
+  // ── Visited name helpers ───────────────────────────────────────────────────
+  const setVisitedName = (idx, val) => {
+    setVisitedNames((prev) => {
+      const next = [...prev];
+      next[idx] = val;
+      return next;
+    });
+  };
+  const addAnotherName = () => {
+    if (visitedNames.length < 5) setVisitedNames((prev) => [...prev, '']);
+  };
+  const removeVisitedName = (idx) => {
+    setVisitedNames((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  // ── Validation ────────────────────────────────────────────────────────────
   const canEndRecovery = (() => {
-    if (!remarks.trim()) return false;
-    if (needsEndPhoto && !photo) return false;
     if (submitting) return false;
-    return true;
+    if (customerMet === null) return false;
+    if (needsEndPhoto && !photo) return false;
+
+    if (customerMet === true) {
+      // At least one non-empty name required
+      const filled = visitedNames.filter((n) => n.trim()).length;
+      if (filled === 0) return false;
+      return true;
+    }
+
+    if (customerMet === false) {
+      // Voice note OR typed reason required
+      if (notMetVoiceUri) return true;
+      if (notMetReason.trim()) return true;
+      return false;
+    }
+
+    return false;
   })();
 
   const handleFinishSuccess = () => {
@@ -158,13 +437,26 @@ export default function CompleteScreen({ route, navigation }) {
   };
 
   const completeRecovery = async () => {
-    if (!remarks.trim()) {
-      Alert.alert('Remarks Required', 'Please enter customer visit remarks before submitting.');
+    if (customerMet === null) {
+      Alert.alert('Required', 'Please select Visited or Not visited.');
       return;
     }
     if (needsEndPhoto && !photo) {
       Alert.alert('Ending Photo Required', 'Please capture the ending speedometer image.');
       return;
+    }
+    if (customerMet === true) {
+      const filled = visitedNames.filter((n) => n.trim()).length;
+      if (filled === 0) {
+        Alert.alert('Names Required', 'Please enter at least one name for Visited.');
+        return;
+      }
+    }
+    if (customerMet === false) {
+      if (!notMetVoiceUri && !notMetReason.trim()) {
+        Alert.alert('Required', 'Please record a voice note or type a reason.');
+        return;
+      }
     }
 
     setSubmitting(true);
@@ -187,16 +479,30 @@ export default function CompleteScreen({ route, navigation }) {
     sAddr = sAddr || '';
     eAddr = eAddr || '';
 
+    const customerNames = customerMet ? visitedNames.filter((n) => n.trim()).map((n) => n.trim()) : [];
+    const activeVoiceUri = customerMet ? voiceUri : notMetVoiceUri;
+    const activeVoiceDuration = customerMet ? voiceDuration : notMetVoiceDuration;
+
+    // Build base remarks string for NLP (keep legacy field for backend compat)
+    const remarksText = customerMet
+      ? (customerNames.length > 0 ? `Visited: ${customerNames.join(', ')}` : 'Visited customer')
+      : (notMetReason.trim() || 'Not visited customer');
+
     try {
-      if (!needsEndPhoto) {
-        // WALK / OTHER: JSON finish endpoint
-        let nlpDetailsStr = '';
-        try {
-          const { nlpDetails } = summarize(remarks.trim());
-          nlpDetailsStr = JSON.stringify(nlpDetails || {});
-        } catch (_e) {}
+      let nlpDetailsStr = '';
+      try {
+        const { nlpDetails } = summarize(remarksText);
+        nlpDetailsStr = JSON.stringify(nlpDetails || {});
+      } catch (_e) {}
+
+      if (!needsEndPhoto && !activeVoiceUri) {
+        // WALK / OTHER without voice: JSON finish endpoint
         await apiPost(`/recovery/sessions/${sessionId}/finish-walk`, {
-          remarks: remarks.trim(),
+          remarks: remarksText,
+          customerMet,
+          customerNames,
+          metAt: metAt.trim() || null,
+          notMetReason: customerMet ? undefined : (notMetReason.trim() || null),
           distanceMeters: Math.round(dist || 0),
           durationSeconds: Math.round(durationSeconds || 0),
           movingSeconds: movingSeconds != null ? Math.round(movingSeconds) : null,
@@ -212,34 +518,40 @@ export default function CompleteScreen({ route, navigation }) {
           nlpDetails: nlpDetailsStr,
         });
       } else {
-        // BIKE / CAR: multipart with ending speedometer
-        let nlpDetailsStr = '';
-        try {
-          const { nlpDetails } = summarize(remarks.trim());
-          nlpDetailsStr = JSON.stringify(nlpDetails || {});
-        } catch (_e) {}
-        await apiUploadFile(
-          `/recovery/sessions/${sessionId}/finish`,
-          {
-            remarks: remarks.trim(),
-            distanceMeters: String(Math.round(dist || 0)),
-            durationSeconds: String(Math.round(durationSeconds || 0)),
-            movingSeconds: movingSeconds != null ? String(Math.round(movingSeconds)) : '',
-            idleSeconds: idleSeconds != null ? String(Math.round(idleSeconds)) : '',
-            unknownSeconds: unknownSeconds != null ? String(Math.round(unknownSeconds)) : '',
-            startAddress: sAddr,
-            endAddress: eAddr,
-            endLocation: JSON.stringify({
-              latitude: end.latitude || 0,
-              longitude: end.longitude || 0,
-              accuracy: end.accuracy || 0,
-            }),
-            nlpDetails: nlpDetailsStr,
-          },
-          'endPhoto',
-          photo
-        );
+        // Multipart: photo and/or voice
+        const fields = {
+          remarks: remarksText,
+          customerMet: String(customerMet),
+          customerNames: JSON.stringify(customerNames),
+          metAt: metAt.trim() || '',
+          notMetReason: customerMet ? '' : (notMetReason.trim() || ''),
+          distanceMeters: String(Math.round(dist || 0)),
+          durationSeconds: String(Math.round(durationSeconds || 0)),
+          movingSeconds: movingSeconds != null ? String(Math.round(movingSeconds)) : '',
+          idleSeconds: idleSeconds != null ? String(Math.round(idleSeconds)) : '',
+          unknownSeconds: unknownSeconds != null ? String(Math.round(unknownSeconds)) : '',
+          startAddress: sAddr,
+          endAddress: eAddr,
+          endLocation: JSON.stringify({
+            latitude: end.latitude || 0,
+            longitude: end.longitude || 0,
+            accuracy: end.accuracy || 0,
+          }),
+          nlpDetails: nlpDetailsStr,
+          voiceDurationSeconds: activeVoiceUri ? String(activeVoiceDuration) : '',
+        };
+
+        const filesMap = {};
+        if (photo) filesMap.endPhoto = photo;
+        if (activeVoiceUri) filesMap.voice = activeVoiceUri;
+
+        const endpoint = needsEndPhoto
+          ? `/recovery/sessions/${sessionId}/finish`
+          : `/recovery/sessions/${sessionId}/finish-walk`;
+
+        await apiUploadFiles(endpoint, fields, filesMap);
       }
+
       handleFinishSuccess();
     } catch (e) {
       if (e.status === 409) {
@@ -251,9 +563,13 @@ export default function CompleteScreen({ route, navigation }) {
       if (isNetworkError(e)) {
         // Save offline, sync later
         try {
-          const { nlpSummary, nlpCategory, nlpDetails } = summarize(remarks.trim());
+          const { nlpSummary, nlpCategory, nlpDetails } = summarize(remarksText);
           let nlpDetailsStr = '';
           try { nlpDetailsStr = JSON.stringify(nlpDetails || {}); } catch (_e) {}
+          const customerNames = customerMet ? visitedNames.filter((n) => n.trim()).map((n) => n.trim()) : [];
+          const activeVoiceUri = customerMet ? voiceUri : notMetVoiceUri;
+          const activeVoiceDuration = customerMet ? voiceDuration : notMetVoiceDuration;
+
           await savePendingSession({
             deviceSessionId: session?.deviceSessionId || sessionId,
             sessionId: session?.sessionId || sessionId,
@@ -275,8 +591,8 @@ export default function CompleteScreen({ route, navigation }) {
             unknownSeconds: unknownSeconds != null ? Math.round(unknownSeconds) : null,
             startAddress: sAddr,
             endAddress: eAddr,
-            remarks: remarks.trim(),
-            rawRemarks: remarks.trim(),
+            remarks: remarksText,
+            rawRemarks: remarksText,
             nlpSummary,
             nlpCategory,
             nlpDetails: nlpDetailsStr,
@@ -284,6 +600,12 @@ export default function CompleteScreen({ route, navigation }) {
             endLocation: end || null,
             startPhotoUri: startPhotoUri || session?.startPhotoUri || null,
             endPhotoUri: needsEndPhoto ? (photo || null) : null,
+            voiceUri: activeVoiceUri || null,
+            voiceDurationSeconds: activeVoiceUri ? activeVoiceDuration : null,
+            customerMet,
+            customerNames,
+            metAt: metAt.trim() || null,
+            notMetReason: customerMet ? null : (notMetReason.trim() || null),
             points: allPoints || [],
             _syncStatus: 'PENDING',
           });
@@ -410,39 +732,114 @@ export default function CompleteScreen({ route, navigation }) {
         )}
       </View>
 
-      {/* ── CUSTOMER VISIT REMARKS ─────────────────────────────────────── */}
+      {/* ── CUSTOMER VISITED / NOT VISITED ─────────────────────────────── */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>2. Customer Visit Remarks *</Text>
-        <Text style={styles.helperText}>
-          Describe what happened during this visit. This will be processed by NLP to generate a recovery category.
-        </Text>
+        <Text style={styles.sectionTitle}>2. Customer Visit Outcome *</Text>
 
-        {/* Remarks box */}
-        <TextInput
-          ref={remarksRef}
-          style={styles.textArea}
-          placeholder="Enter customer visit remarks here..."
-          placeholderTextColor="#94A3B8"
-          multiline
-          numberOfLines={5}
-          value={remarks}
-          onChangeText={setRemarks}
-          textAlignVertical="top"
-          onFocus={() => {
-            setTimeout(() => {
-              remarksRef.current?.measureLayout(
-                scrollViewRef.current?.getInnerViewNode?.() ?? scrollViewRef.current,
-                (_x, y) => {
-                  scrollViewRef.current?.scrollTo({ y: y - 20, animated: true });
-                },
-                () => {
-                  scrollViewRef.current?.scrollToEnd({ animated: true });
-                }
-              );
-            }, 150);
-          }}
-        />
-        <Text style={styles.charCount}>{remarks.trim().length} characters</Text>
+        {/* Option buttons */}
+        <View style={styles.metRow}>
+          <TouchableOpacity
+            style={[styles.metBtn, customerMet === true && styles.metBtnActive]}
+            onPress={() => { setCustomerMet(true); }}
+            activeOpacity={0.8}
+          >
+            <Ionicons name="checkmark-circle-outline" size={18}
+              color={customerMet === true ? '#059669' : '#64748B'} style={{ marginRight: 6 }} />
+            <Text style={[styles.metBtnText, customerMet === true && { color: '#059669' }]}>
+              Visited the customer
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.metBtn, customerMet === false && styles.metBtnNotActive]}
+            onPress={() => { setCustomerMet(false); }}
+            activeOpacity={0.8}
+          >
+            <Ionicons name="close-circle-outline" size={18}
+              color={customerMet === false ? '#DC2626' : '#64748B'} style={{ marginRight: 6 }} />
+            <Text style={[styles.metBtnText, customerMet === false && { color: '#DC2626' }]}>
+              Not visited the customer
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* ── VISITED: Names + voice ──────────────────────────────────────── */}
+        {customerMet === true ? (
+          <View style={styles.outcomeSub}>
+            <Text style={styles.subLabel}>Names of persons visited *</Text>
+            {visitedNames.map((name, idx) => (
+              <View key={idx} style={styles.nameRow}>
+                <TextInput
+                  style={styles.nameInput}
+                  placeholder={`Person ${idx + 1} name`}
+                  placeholderTextColor="#94A3B8"
+                  value={name}
+                  onChangeText={(v) => setVisitedName(idx, v)}
+                  autoCorrect={false}
+                />
+                {visitedNames.length > 1 ? (
+                  <TouchableOpacity onPress={() => removeVisitedName(idx)} style={styles.removeNameBtn}>
+                    <Ionicons name="close-circle" size={20} color="#94A3B8" />
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+            ))}
+            {visitedNames.length < 5 ? (
+              <TouchableOpacity style={styles.addNameBtn} onPress={addAnotherName} activeOpacity={0.7}>
+                <Ionicons name="add-circle-outline" size={16} color="#2563EB" style={{ marginRight: 6 }} />
+                <Text style={styles.addNameBtnText}>+ Add another name</Text>
+              </TouchableOpacity>
+            ) : null}
+
+            <Text style={[styles.subLabel, { marginTop: 14 }]}>Voice note (optional)</Text>
+            <VoiceRecorder
+              onRecorded={(uri, dur) => { setVoiceUri(uri); setVoiceDuration(dur); }}
+              onCleared={() => { setVoiceUri(null); setVoiceDuration(0); }}
+            />
+          </View>
+        ) : null}
+
+        {/* ── NOT VISITED: Voice or typed reason ─────────────────────────── */}
+        {customerMet === false ? (
+          <View style={styles.outcomeSub}>
+            <Text style={styles.subLabel}>Reason for not visiting *</Text>
+            {!showTypedReason ? (
+              <>
+                <VoiceRecorder
+                  onRecorded={(uri, dur) => { setNotMetVoiceUri(uri); setNotMetVoiceDuration(dur); }}
+                  onCleared={() => { setNotMetVoiceUri(null); setNotMetVoiceDuration(0); }}
+                />
+                <TouchableOpacity
+                  style={styles.typeInsteadLink}
+                  onPress={() => setShowTypedReason(true)}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.typeInsteadText}>Type a reason instead</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <>
+                <TextInput
+                  style={styles.textArea}
+                  placeholder="Enter reason for not visiting..."
+                  placeholderTextColor="#94A3B8"
+                  multiline
+                  numberOfLines={4}
+                  value={notMetReason}
+                  onChangeText={setNotMetReason}
+                  textAlignVertical="top"
+                />
+                <TouchableOpacity
+                  style={styles.typeInsteadLink}
+                  onPress={() => setShowTypedReason(false)}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.typeInsteadText}>Record voice note instead</Text>
+                </TouchableOpacity>
+              </>
+            )}
+          </View>
+        ) : null}
       </View>
 
       {/* ── END RECOVERY BUTTON ──────────────────────────────────────────── */}
@@ -458,17 +855,21 @@ export default function CompleteScreen({ route, navigation }) {
           ) : (
             <View style={styles.completeBtnContent}>
               <Ionicons name="checkmark-done-circle" size={22} color="#FFFFFF" style={{ marginRight: 8 }} />
-              <Text style={styles.completeBtnText}>COMPLETE RECOVERY</Text>
+              <Text style={styles.completeBtnText}>END RECOVERY</Text>
             </View>
           )}
         </TouchableOpacity>
 
         {!canEndRecovery ? (
           <Text style={styles.validationNote}>
-            {needsEndPhoto && !photo
-              ? 'Capture ending speedometer photo and enter remarks to proceed'
-              : !remarks.trim()
-              ? 'Enter customer visit remarks to proceed'
+            {customerMet === null
+              ? 'Select Visited or Not visited to proceed'
+              : needsEndPhoto && !photo
+              ? 'Capture ending speedometer photo to proceed'
+              : customerMet === true && visitedNames.filter((n) => n.trim()).length === 0
+              ? 'Enter at least one name to proceed'
+              : customerMet === false && !notMetVoiceUri && !notMetReason.trim()
+              ? 'Record a voice note or type a reason to proceed'
               : ''}
           </Text>
         ) : null}
@@ -549,12 +950,44 @@ const styles = StyleSheet.create({
   },
   retakeBtnText: { color: '#2563EB', fontSize: 13, fontWeight: '700' },
 
+  // Customer met buttons
+  metRow: { gap: 10, marginBottom: 14 },
+  metBtn: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: '#FFFFFF', borderRadius: 12, padding: 14,
+    borderWidth: 1.5, borderColor: '#E2E8F0',
+  },
+  metBtnActive: { borderColor: '#059669', backgroundColor: '#F0FDF4' },
+  metBtnNotActive: { borderColor: '#DC2626', backgroundColor: '#FEF2F2' },
+  metBtnText: { fontSize: 14, fontWeight: '600', color: '#64748B' },
+
+  outcomeSub: {
+    backgroundColor: '#F8FAFC', borderRadius: 12, padding: 14,
+    borderWidth: 1, borderColor: '#E2E8F0',
+  },
+  subLabel: { fontSize: 12, fontWeight: '700', color: '#475569', marginBottom: 10, textTransform: 'uppercase', letterSpacing: 0.3 },
+
+  nameRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
+  nameInput: {
+    flex: 1, backgroundColor: '#FFFFFF', borderWidth: 1.5, borderColor: '#E2E8F0',
+    borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10,
+    fontSize: 14, color: '#0F172A', fontWeight: '500',
+  },
+  removeNameBtn: { marginLeft: 8, padding: 4 },
+  addNameBtn: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingVertical: 6, marginBottom: 4,
+  },
+  addNameBtnText: { fontSize: 13, color: '#2563EB', fontWeight: '600' },
+
+  typeInsteadLink: { marginTop: 10, alignSelf: 'center', paddingVertical: 4 },
+  typeInsteadText: { fontSize: 13, color: '#2563EB', fontWeight: '600', textDecorationLine: 'underline' },
+
   textArea: {
     backgroundColor: '#FFFFFF', borderWidth: 1.5, borderColor: '#E2E8F0',
     borderRadius: 12, padding: 14, fontSize: 14, color: '#0F172A',
-    minHeight: 110, fontWeight: '500',
+    minHeight: 100, fontWeight: '500',
   },
-  charCount: { fontSize: 11, color: '#94A3B8', textAlign: 'right', marginTop: 4 },
 
   actionSection: { marginTop: 6, marginBottom: 20 },
   completeBtn: {

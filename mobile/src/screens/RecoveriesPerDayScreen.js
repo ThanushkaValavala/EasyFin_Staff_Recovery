@@ -1,9 +1,10 @@
 import { useState, useMemo } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  TextInput, KeyboardAvoidingView, Platform,
+  TextInput, KeyboardAvoidingView, Platform, ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { apiGet } from '../api';
 
 // ── Date helpers ────────────────────────────────────────────────────────────
 
@@ -76,6 +77,102 @@ function chipRange(chip) {
 }
 
 // ── Main screen ───────────────────────────────────────────────────────────────
+
+/** Fetch signed voice URL and play it. Errors are handled quietly. */
+async function playVoiceNote(sessionId) {
+  try {
+    const res = await apiGet(`/recovery/sessions/${sessionId}/voice-url`);
+    const url = res?.url || res?.signedUrl || res?.voiceUrl;
+    if (!url) return;
+    const { AudioPlayer } = await import('expo-audio');
+    const player = new AudioPlayer(url);
+    player.play();
+  } catch (e) {
+    console.warn('[RecoveriesPerDay] Voice playback error:', e.message);
+  }
+}
+
+/** Compact session card for the per-day expanded list */
+function SessionMiniCard({ session }) {
+  const hasMetField = session.customerMet != null;
+  let visitedLabel = null;
+  if (hasMetField) {
+    if (session.customerMet === true || session.customerMet === 'true') {
+      const names = Array.isArray(session.customerNames) && session.customerNames.length > 0
+        ? session.customerNames.join(', ')
+        : null;
+      visitedLabel = names ? `Visited: ${names}` : 'Visited the customer';
+    } else {
+      visitedLabel = 'Not visited';
+    }
+  }
+
+  const hasVoice = !!(session.voicePath || session.voiceUri);
+  const sessionIdForVoice = session._id || session.sessionId;
+  const [voicePlaying, setVoicePlaying] = useState(false);
+
+  const handlePlayVoice = async () => {
+    if (!sessionIdForVoice) return;
+    setVoicePlaying(true);
+    try {
+      await playVoiceNote(sessionIdForVoice);
+    } finally {
+      setVoicePlaying(false);
+    }
+  };
+
+  const fmtTime = (d) => {
+    if (!d) return '-';
+    const x = new Date(d);
+    if (isNaN(x.getTime())) return '-';
+    const p = (n) => String(n).padStart(2, '0');
+    const h = x.getHours() % 12 || 12;
+    return `${p(h)}:${p(x.getMinutes())} ${x.getHours() < 12 ? 'AM' : 'PM'}`;
+  };
+
+  return (
+    <View style={styles.miniCard}>
+      <View style={styles.miniCardHeader}>
+        <Text style={styles.miniCardTime}>{fmtTime(session.startTime)}</Text>
+        {session.vehicleType ? (
+          <Text style={styles.miniCardMode}>{session.vehicleType}</Text>
+        ) : null}
+      </View>
+      {visitedLabel ? (
+        <View style={[styles.miniVisitedRow,
+          { backgroundColor: session.customerMet === true || session.customerMet === 'true' ? '#F0FDF4' : '#FEF2F2' }
+        ]}>
+          <Ionicons
+            name={session.customerMet === true || session.customerMet === 'true' ? 'checkmark-circle-outline' : 'close-circle-outline'}
+            size={13}
+            color={session.customerMet === true || session.customerMet === 'true' ? '#059669' : '#DC2626'}
+            style={{ marginRight: 5 }}
+          />
+          <Text style={[styles.miniVisitedText,
+            { color: session.customerMet === true || session.customerMet === 'true' ? '#15803D' : '#DC2626' }
+          ]}>
+            {visitedLabel}
+          </Text>
+        </View>
+      ) : null}
+      {hasVoice && sessionIdForVoice ? (
+        <TouchableOpacity
+          style={styles.miniPlayVoiceBtn}
+          onPress={handlePlayVoice}
+          disabled={voicePlaying}
+          activeOpacity={0.7}
+        >
+          {voicePlaying ? (
+            <ActivityIndicator size="small" color="#2563EB" style={{ marginRight: 5 }} />
+          ) : (
+            <Ionicons name="play-circle-outline" size={14} color="#2563EB" style={{ marginRight: 5 }} />
+          )}
+          <Text style={styles.miniPlayVoiceText}>Play voice note</Text>
+        </TouchableOpacity>
+      ) : null}
+    </View>
+  );
+}
 
 export default function RecoveriesPerDayScreen({ route }) {
   const sessions = route?.params?.sessions || [];
@@ -154,6 +251,7 @@ export default function RecoveriesPerDayScreen({ route }) {
   // ── Build per-day counts ────────────────────────────────────────────────────
   const { rows, totalInRange } = useMemo(() => {
     const counts = {}; // "YYYY-MM-DD" → count
+    const sessionsMap = {}; // "YYYY-MM-DD" → session[]
 
     for (const session of sessions) {
       const rawDate = session.startTime || session.endTime;
@@ -168,17 +266,44 @@ export default function RecoveriesPerDayScreen({ route }) {
       }
 
       counts[key] = (counts[key] || 0) + 1;
+      if (!sessionsMap[key]) sessionsMap[key] = [];
+      sessionsMap[key].push(session);
     }
 
     // Sort most recent first
     const sortedKeys = Object.keys(counts).sort((a, b) => (a < b ? 1 : -1));
-    const rows = sortedKeys.map((key) => ({ dateKey: key, count: counts[key] }));
+    const rows = sortedKeys.map((key) => ({ dateKey: key, count: counts[key], sessions: sessionsMap[key] || [] }));
     const totalInRange = rows.reduce((sum, r) => sum + r.count, 0);
 
     return { rows, totalInRange };
   }, [sessions, fromDate, toDate]);
 
   const activeError = rangeError || error;
+
+  // Track expanded day keys
+  const [expandedDays, setExpandedDays] = useState({});
+
+  // Build a map of day → sessions (derived from sessions prop and filter)
+  const sessionsPerDay = useMemo(() => {
+    const map = {};
+    for (const session of sessions) {
+      const rawDate = session.startTime || session.endTime;
+      const key = toLocalDateKey(rawDate);
+      if (!key) continue;
+      if (fromDate || toDate) {
+        const sessionDate = new Date(rawDate);
+        if (fromDate && sessionDate < fromDate) continue;
+        if (toDate && sessionDate > toDate) continue;
+      }
+      if (!map[key]) map[key] = [];
+      map[key].push(session);
+    }
+    return map;
+  }, [sessions, fromDate, toDate]);
+
+  const toggleDay = (key) => {
+    setExpandedDays((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
 
   return (
     <KeyboardAvoidingView
@@ -258,15 +383,35 @@ export default function RecoveriesPerDayScreen({ route }) {
         ) : (
           <>
             <View style={styles.listCard}>
-              {rows.map((row, idx) => (
-                <View
-                  key={row.dateKey}
-                  style={[styles.dayRow, idx < rows.length - 1 && styles.dayRowBorder]}
-                >
-                  <Text style={styles.dayDate}>{keyToDisplay(row.dateKey)}</Text>
-                  <Text style={styles.dayCount}>{row.count}</Text>
-                </View>
-              ))}
+              {rows.map((row, idx) => {
+                const isExpanded = !!expandedDays[row.dateKey];
+                const daySessions = sessionsPerDay[row.dateKey] || [];
+                return (
+                  <View key={row.dateKey}>
+                    <TouchableOpacity
+                      style={[styles.dayRow, idx < rows.length - 1 && !isExpanded && styles.dayRowBorder]}
+                      onPress={() => toggleDay(row.dateKey)}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={styles.dayDate}>{keyToDisplay(row.dateKey)}</Text>
+                      <View style={styles.dayRowRight}>
+                        <Text style={styles.dayCount}>{row.count}</Text>
+                        <Ionicons
+                          name={isExpanded ? 'chevron-up' : 'chevron-down'}
+                          size={14} color="#94A3B8" style={{ marginLeft: 6 }}
+                        />
+                      </View>
+                    </TouchableOpacity>
+                    {isExpanded ? (
+                      <View style={[styles.sessionsList, idx < rows.length - 1 && styles.dayRowBorder]}>
+                        {daySessions.map((s, si) => (
+                          <SessionMiniCard key={s._id || s.sessionId || si} session={s} />
+                        ))}
+                      </View>
+                    ) : null}
+                  </View>
+                );
+              })}
             </View>
 
             <View style={styles.totalRow}>
@@ -332,6 +477,26 @@ const styles = StyleSheet.create({
   dayRowBorder: { borderBottomWidth: 1, borderBottomColor: '#F1F5F9' },
   dayDate: { fontSize: 14, fontWeight: '600', color: '#334155' },
   dayCount: { fontSize: 15, fontWeight: '800', color: '#2563EB' },
+  dayRowRight: { flexDirection: 'row', alignItems: 'center' },
+  sessionsList: { paddingHorizontal: 12, paddingBottom: 10 },
+  miniCard: {
+    backgroundColor: '#F8FAFC', borderRadius: 10, padding: 10,
+    marginBottom: 6, borderWidth: 1, borderColor: '#E2E8F0',
+  },
+  miniCardHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
+  miniCardTime: { fontSize: 12, fontWeight: '700', color: '#334155' },
+  miniCardMode: { fontSize: 11, fontWeight: '700', color: '#64748B', textTransform: 'uppercase' },
+  miniVisitedRow: {
+    flexDirection: 'row', alignItems: 'center',
+    borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4, marginBottom: 6,
+  },
+  miniVisitedText: { fontSize: 12, fontWeight: '700' },
+  miniPlayVoiceBtn: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: '#EFF6FF', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4,
+    borderWidth: 1, borderColor: '#BFDBFE', alignSelf: 'flex-start',
+  },
+  miniPlayVoiceText: { fontSize: 12, fontWeight: '700', color: '#2563EB' },
 
   // Total row
   totalRow: {

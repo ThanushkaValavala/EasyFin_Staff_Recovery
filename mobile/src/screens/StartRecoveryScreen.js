@@ -1,13 +1,13 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
-  ScrollView, ActivityIndicator, Image, Alert,
+  ScrollView, ActivityIndicator, Image, Alert, FlatList,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
-import { apiUploadFile, apiPost } from '../api';
+import { apiUploadFile, apiPost, apiGet } from '../api';
 
 function generateDeviceSessionId() {
   const ts = Date.now().toString(36);
@@ -19,23 +19,12 @@ function generateDeviceSessionId() {
 const TRANSPORT_MODES = [
   {
     key: 'WALK',
-    label: 'Walking',
+    label: 'Walk',
     icon: 'walk-outline',
     sub: 'No vehicle required • Start immediately',
     color: '#059669',
     bgColor: '#ECFDF5',
     borderColor: '#6EE7B7',
-    requiresVehicle: false,
-    requiresPhoto: false,
-  },
-  {
-    key: 'OTHER',
-    label: 'Other',
-    icon: 'bus-outline',
-    sub: 'General / public transit • Start immediately',
-    color: '#0284C7',
-    bgColor: '#E0F2FE',
-    borderColor: '#7DD3FC',
     requiresVehicle: false,
     requiresPhoto: false,
   },
@@ -61,6 +50,17 @@ const TRANSPORT_MODES = [
     requiresVehicle: true,
     requiresPhoto: true,
   },
+  {
+    key: 'OTHER',
+    label: 'Other',
+    icon: 'bus-outline',
+    sub: 'General / public transit • Start immediately',
+    color: '#0284C7',
+    bgColor: '#E0F2FE',
+    borderColor: '#7DD3FC',
+    requiresVehicle: false,
+    requiresPhoto: false,
+  },
 ];
 
 export default function StartRecoveryScreen({ route, navigation }) {
@@ -70,6 +70,18 @@ export default function StartRecoveryScreen({ route, navigation }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
+  // ── Planned Location ──────────────────────────────────────────────────────
+  const [locationQuery, setLocationQuery] = useState('');
+  const [locationSuggestions, setLocationSuggestions] = useState([]);
+  const [plannedLocation, setPlannedLocation] = useState(null); // { name, latitude, longitude }
+  const [locationLoading, setLocationLoading] = useState(false);
+  const [locationError, setLocationError] = useState('');
+  const debounceRef = useRef(null);
+
+  // ── Person count & names ──────────────────────────────────────────────────
+  const [plannedPersonCount, setPlannedPersonCount] = useState('');
+  const [plannedNames, setPlannedNames] = useState([]);
+
   // Device-side session ID for idempotency & offline safety
   const deviceSessionId = useRef(generateDeviceSessionId()).current;
 
@@ -77,15 +89,95 @@ export default function StartRecoveryScreen({ route, navigation }) {
   const needsVehicle = selectedMode?.requiresVehicle || false;
   const needsPhoto = selectedMode?.requiresPhoto || false;
 
-  // Validation Rules:
-  // WALK/OTHER: Transport selected only → ready to start
-  // BIKE/CAR: Valid vehicle number (>= 4 alphanumeric) AND camera image
+  const personCount = parseInt(plannedPersonCount, 10);
+  const validPersonCount = !isNaN(personCount) && personCount >= 1 && personCount <= 10;
+
+  // ── Validation ────────────────────────────────────────────────────────────
   const canStart = (() => {
     if (!transportMode) return false;
+    if (!plannedLocation) return false;
+    if (!validPersonCount) return false;
+    // All name boxes must be filled (trimmed non-empty)
+    if (plannedNames.length !== personCount) return false;
+    for (let i = 0; i < personCount; i++) {
+      if (!(plannedNames[i] || '').trim()) return false;
+    }
     if (!needsVehicle) return true;
     const vnClean = vehicleNumber.replace(/[\s-]/g, '').toUpperCase();
     return vnClean.length >= 4 && !!photo;
   })();
+
+  // ── Place search (debounced, 400 ms, min 3 chars) ─────────────────────────
+  const fetchSuggestions = useCallback(async (q) => {
+    if (!q || q.length < 3) {
+      setLocationSuggestions([]);
+      setLocationLoading(false);
+      return;
+    }
+    setLocationLoading(true);
+    setLocationError('');
+    try {
+      const res = await apiGet(`/places/search?q=${encodeURIComponent(q)}&limit=5`);
+      const list = Array.isArray(res) ? res : (res.results || res.places || []);
+      setLocationSuggestions(list.slice(0, 5));
+    } catch (e) {
+      // If suggestions fail, allow typing only
+      setLocationSuggestions([]);
+      setLocationError('Could not load suggestions. You may type the name instead.');
+    } finally {
+      setLocationLoading(false);
+    }
+  }, []);
+
+  const handleLocationQueryChange = (text) => {
+    setLocationQuery(text);
+    // If user edits after picking, clear the confirmed selection
+    if (plannedLocation && text !== plannedLocation.name) {
+      setPlannedLocation(null);
+    }
+    setLocationError('');
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      fetchSuggestions(text);
+    }, 400);
+  };
+
+  const pickSuggestion = (item) => {
+    const loc = {
+      name: item.name || item.displayName || locationQuery,
+      latitude: item.latitude || item.lat,
+      longitude: item.longitude || item.lon || item.lng,
+    };
+    setPlannedLocation(loc);
+    setLocationQuery(loc.name);
+    setLocationSuggestions([]);
+    setLocationError('');
+  };
+
+  // ── Person count change — resize the names array ──────────────────────────
+  const handlePersonCountChange = (val) => {
+    // Allow only digits 1-10
+    const cleaned = val.replace(/[^0-9]/g, '');
+    setPlannedPersonCount(cleaned);
+    const n = parseInt(cleaned, 10);
+    if (!isNaN(n) && n >= 1 && n <= 10) {
+      setPlannedNames((prev) => {
+        const next = [...prev];
+        while (next.length < n) next.push('');
+        return next.slice(0, n);
+      });
+    } else {
+      setPlannedNames([]);
+    }
+  };
+
+  const setName = (idx, val) => {
+    setPlannedNames((prev) => {
+      const next = [...prev];
+      next[idx] = val;
+      return next;
+    });
+  };
 
   const takeSpeedometer = async () => {
     const perm = await ImagePicker.requestCameraPermissionsAsync();
@@ -113,6 +205,20 @@ export default function StartRecoveryScreen({ route, navigation }) {
       setError('Please select a transport mode.');
       return;
     }
+    if (!plannedLocation) {
+      setError('Please select a location to visit from the suggestions.');
+      return;
+    }
+    if (!validPersonCount) {
+      setError('Please enter the number of persons to visit (1–10).');
+      return;
+    }
+    for (let i = 0; i < personCount; i++) {
+      if (!(plannedNames[i] || '').trim()) {
+        setError(`Please enter the name for Person ${i + 1}.`);
+        return;
+      }
+    }
     if (needsVehicle) {
       if (!vehicleNumber.trim()) {
         setError('Vehicle registration number is required.');
@@ -133,6 +239,8 @@ export default function StartRecoveryScreen({ route, navigation }) {
 
     // ── Declared outside try so catch/offline-fallback can always access it ──
     let initialLocation = null;
+
+    const trimmedNames = plannedNames.slice(0, personCount).map((n) => n.trim());
 
     try {
       // ── Step 1: Location permission ────────────────────────────────────────
@@ -186,6 +294,13 @@ export default function StartRecoveryScreen({ route, navigation }) {
       // ── Step 3: API call ───────────────────────────────────────────────────
       console.log('[StartRecovery] API_REQUEST_STARTED', { vehicleType: transportMode, deviceSessionId });
 
+      // Extra fields to include in the start call
+      const extraFields = {
+        plannedLocation: JSON.stringify(plannedLocation),
+        plannedPersonCount: String(personCount),
+        plannedNames: JSON.stringify(trimmedNames),
+      };
+
       let data;
       if (!needsPhoto) {
         // WALK / OTHER: plain JSON start
@@ -194,6 +309,9 @@ export default function StartRecoveryScreen({ route, navigation }) {
           vehicleNumber: '',
           initialLocation,
           deviceSessionId,
+          plannedLocation,
+          plannedPersonCount: personCount,
+          plannedNames: trimmedNames,
         });
       } else {
         // BIKE / CAR: multipart with starting speedometer photo
@@ -204,6 +322,7 @@ export default function StartRecoveryScreen({ route, navigation }) {
             vehicleNumber: vehicleNumber.trim().toUpperCase(),
             initialLocation: JSON.stringify(initialLocation),
             deviceSessionId,
+            ...extraFields,
           },
           'startPhoto',
           photo
@@ -219,6 +338,9 @@ export default function StartRecoveryScreen({ route, navigation }) {
         vehicleNumber: needsVehicle ? vehicleNumber.trim().toUpperCase() : '',
         startLocation: initialLocation,
         startTime: new Date().toISOString(),
+        plannedLocation,
+        plannedPersonCount: personCount,
+        plannedNames: trimmedNames,
       };
 
       console.log('[StartRecovery] NAVIGATING_TO_ACTIVE_RECOVERY', { sessionId: createdSession.sessionId });
@@ -227,6 +349,9 @@ export default function StartRecoveryScreen({ route, navigation }) {
         transportMode,
         vehicleNumber: needsVehicle ? vehicleNumber.trim().toUpperCase() : '',
         startPhotoUri: photo || createdSession.startPhotoUri || null,
+        plannedLocation,
+        plannedPersonCount: personCount,
+        plannedNames: trimmedNames,
       });
 
     } catch (e) {
@@ -248,6 +373,9 @@ export default function StartRecoveryScreen({ route, navigation }) {
                   transportMode: e.data.session.vehicleType || transportMode,
                   vehicleNumber: e.data.session.vehicleNumber || '',
                   startPhotoUri: photo || null,
+                  plannedLocation: e.data.session.plannedLocation || plannedLocation,
+                  plannedPersonCount: e.data.session.plannedPersonCount || personCount,
+                  plannedNames: e.data.session.plannedNames || trimmedNames,
                 });
               },
             },
@@ -282,6 +410,9 @@ export default function StartRecoveryScreen({ route, navigation }) {
           // If GPS failed we would have returned early above, never reaching this catch block.
           startLocation: initialLocation,
           startPhotoUri: photo || null,
+          plannedLocation,
+          plannedPersonCount: personCount,
+          plannedNames: trimmedNames,
           _syncStatus: 'PENDING',
         };
 
@@ -291,6 +422,9 @@ export default function StartRecoveryScreen({ route, navigation }) {
           transportMode,
           vehicleNumber: needsVehicle ? vehicleNumber.trim().toUpperCase() : '',
           startPhotoUri: photo || null,
+          plannedLocation,
+          plannedPersonCount: personCount,
+          plannedNames: trimmedNames,
         });
         return;
       }
@@ -371,10 +505,85 @@ export default function StartRecoveryScreen({ route, navigation }) {
           })}
         </View>
 
-        {/* ── STEP 2: VEHICLE NUMBER (BIKE/CAR only) ──────────────────── */}
+        {/* ── STEP 2: LOCATION TO VISIT ────────────────────────────────── */}
+        <Text style={styles.sectionLabel}>2. Location you want to visit *</Text>
+        <View style={styles.inputWrapper}>
+          <Ionicons name="location-outline" size={20} color="#64748B" style={styles.inputIcon} />
+          <TextInput
+            style={styles.input}
+            placeholder="Search for a location..."
+            placeholderTextColor="#94A3B8"
+            autoCorrect={false}
+            value={locationQuery}
+            onChangeText={handleLocationQueryChange}
+          />
+          {locationLoading ? (
+            <ActivityIndicator size="small" color="#2563EB" style={{ marginLeft: 6 }} />
+          ) : null}
+          {plannedLocation ? (
+            <Ionicons name="checkmark-circle" size={20} color="#059669" style={{ marginLeft: 6 }} />
+          ) : null}
+        </View>
+        {locationError ? (
+          <Text style={styles.locationErrorText}>{locationError}</Text>
+        ) : null}
+        {locationSuggestions.length > 0 ? (
+          <View style={styles.suggestionsBox}>
+            {locationSuggestions.map((item, idx) => (
+              <TouchableOpacity
+                key={idx}
+                style={[
+                  styles.suggestionItem,
+                  idx < locationSuggestions.length - 1 && styles.suggestionItemBorder,
+                ]}
+                onPress={() => pickSuggestion(item)}
+                activeOpacity={0.7}
+              >
+                <Ionicons name="location-outline" size={14} color="#64748B" style={{ marginRight: 8 }} />
+                <Text style={styles.suggestionText} numberOfLines={2}>
+                  {item.name || item.displayName || ''}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        ) : null}
+
+        {/* ── STEP 3: NUMBER OF PERSONS ─────────────────────────────────── */}
+        <Text style={styles.sectionLabel}>3. Number of persons you want to visit *</Text>
+        <View style={styles.inputWrapper}>
+          <Ionicons name="people-outline" size={20} color="#64748B" style={styles.inputIcon} />
+          <TextInput
+            style={styles.input}
+            placeholder="Enter a number (1–10)"
+            placeholderTextColor="#94A3B8"
+            keyboardType="numeric"
+            maxLength={2}
+            value={plannedPersonCount}
+            onChangeText={handlePersonCountChange}
+          />
+        </View>
+
+        {/* ── PERSON NAME BOXES ─────────────────────────────────────────── */}
+        {validPersonCount
+          ? Array.from({ length: personCount }).map((_, i) => (
+            <View key={i} style={styles.inputWrapper}>
+              <Ionicons name="person-outline" size={20} color="#64748B" style={styles.inputIcon} />
+              <TextInput
+                style={styles.input}
+                placeholder={`Person ${i + 1} name`}
+                placeholderTextColor="#94A3B8"
+                autoCorrect={false}
+                value={plannedNames[i] || ''}
+                onChangeText={(val) => setName(i, val)}
+              />
+            </View>
+          ))
+          : null}
+
+        {/* ── STEP 4: VEHICLE NUMBER (BIKE/CAR only) ──────────────────── */}
         {needsVehicle ? (
           <>
-            <Text style={styles.sectionLabel}>2. Vehicle Registration Number</Text>
+            <Text style={styles.sectionLabel}>4. Vehicle Registration Number</Text>
             <View style={styles.inputWrapper}>
               <Ionicons name="car-outline" size={20} color="#64748B" style={styles.inputIcon} />
               <TextInput
@@ -389,7 +598,7 @@ export default function StartRecoveryScreen({ route, navigation }) {
               />
             </View>
 
-            <Text style={styles.sectionLabel}>3. Starting Speedometer Evidence</Text>
+            <Text style={styles.sectionLabel}>5. Starting Speedometer Evidence</Text>
             <Text style={styles.helperText}>
               Camera only — capture the speedometer reading before you begin.
             </Text>
@@ -427,16 +636,20 @@ export default function StartRecoveryScreen({ route, navigation }) {
             ) : (
               <View style={styles.startBtnContent}>
                 <Ionicons name="play-circle" size={22} color="#FFFFFF" style={{ marginRight: 8 }} />
-                <Text style={styles.startBtnText}>Start Recovery</Text>
+                <Text style={styles.startBtnText}>START RECOVERY</Text>
               </View>
             )}
           </TouchableOpacity>
 
           {transportMode && !canStart ? (
             <Text style={styles.validationHint}>
-              {needsVehicle
+              {!plannedLocation
+                ? 'Pick a location suggestion to proceed'
+                : !validPersonCount
+                ? 'Enter the number of persons (1–10)'
+                : needsVehicle
                 ? 'Enter vehicle number and take starting speedometer photo to proceed'
-                : 'Ready — tap Start Recovery'}
+                : 'Fill all required fields to proceed'}
             </Text>
           ) : null}
         </View>
@@ -486,10 +699,24 @@ const styles = StyleSheet.create({
   inputWrapper: {
     flexDirection: 'row', alignItems: 'center', backgroundColor: '#FFFFFF',
     borderWidth: 1.5, borderColor: '#E2E8F0', borderRadius: 12,
-    paddingHorizontal: 14, height: 52, marginBottom: 14,
+    paddingHorizontal: 14, height: 52, marginBottom: 10,
   },
   inputIcon: { marginRight: 10 },
-  input: { flex: 1, fontSize: 15, fontWeight: '600', color: '#0F172A', letterSpacing: 0.5 },
+  input: { flex: 1, fontSize: 15, fontWeight: '500', color: '#0F172A' },
+
+  locationErrorText: { fontSize: 12, color: '#D97706', marginBottom: 8, fontWeight: '500' },
+
+  suggestionsBox: {
+    backgroundColor: '#FFFFFF', borderRadius: 12, borderWidth: 1.5,
+    borderColor: '#E2E8F0', marginBottom: 10, overflow: 'hidden',
+  },
+  suggestionItem: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: 14, paddingVertical: 12,
+  },
+  suggestionItemBorder: { borderBottomWidth: 1, borderBottomColor: '#F1F5F9' },
+  suggestionText: { fontSize: 13, color: '#0F172A', fontWeight: '500', flex: 1 },
+
   helperText: { fontSize: 12, color: '#64748B', marginBottom: 12, marginTop: -4, fontWeight: '500' },
 
   cameraBtn: {
