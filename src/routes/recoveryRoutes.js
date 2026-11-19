@@ -7,6 +7,7 @@ const evidenceController = require('../controllers/evidenceController');
 const { protect } = require('../middleware/authMiddleware');
 const upload = require('../middleware/uploadMiddleware');
 const flow = require('../controllers/recoveryFlowController');
+const places = require('../controllers/placesController');
 
 // Recovery session routes
 router.post('/start', protect, recoverySessionController.startSession);
@@ -56,20 +57,34 @@ router.get(
   protect,
   recoverySessionController.getJourneyDetails
 );
-router.post('/start-with-photo', protect, upload.safeSingle('startPhoto'), flow.startWithPhoto);
-router.post('/sessions/:sessionId/finish', protect, upload.safeSingle('endPhoto'), flow.finishSession);
-router.post('/sessions/:sessionId/finish-walk', protect, flow.finishSessionWalk);
+
+// Flow routes — updated to support optional voice + new middleware
+router.post('/start-with-photo', protect, upload.safeStartWithVoice(), flow.startWithPhoto);
+router.post('/sessions/:sessionId/finish', protect, upload.safeFinishWithVoice(), flow.finishSession);
+router.post('/sessions/:sessionId/finish-walk', protect, upload.safeFieldsWithVoice([{ name: 'voice', maxCount: 1 }]), flow.finishSessionWalk);
+
 router.get('/evidence/:evidenceId/image', protect, evidenceController.getEvidenceImage);
 router.get('/history', protect, flow.getHistory);
+
 router.post(
   '/sync',
   protect,
-  upload.safeFields([
+  upload.safeFieldsWithVoice([
     { name: 'startPhoto', maxCount: 1 },
-    { name: 'endPhoto', maxCount: 1 }
+    { name: 'endPhoto', maxCount: 1 },
+    { name: 'voice', maxCount: 1 }
   ]),
   flow.syncOfflineSession
 );
+
 router.get('/stats', protect, flow.getAgentStats);
+
+// New: signed URL endpoints
+router.get('/sessions/:sessionId/voice-url', protect, flow.getVoiceUrl);
+router.get('/evidence/:evidenceId/url', protect, flow.getEvidenceUrl);
+
+// Places / geocoding (proxied via Photon, rate-limited)
+router.get('/places/search', protect, places.searchPlaces);
+router.get('/places/reverse', protect, places.reverseGeocode);
 
 module.exports = router;

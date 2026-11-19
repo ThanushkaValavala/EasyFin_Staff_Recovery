@@ -1,13 +1,13 @@
 const mongoose = require('mongoose');
 const { v4: uuidv4 } = require('uuid');
 
-
-
-
-
 const { getIsConnected } = require('../config/db');
 const rules = require('../services/recoveryRules');
 const { summarize } = require('../services/nlpSummarizer');
+const storage = require('../services/storage');
+
+const PHOTO_BUCKET = process.env.SUPABASE_PHOTO_BUCKET || 'photos';
+const VOICE_BUCKET = process.env.SUPABASE_VOICE_BUCKET || 'voices';
 
 const fail = (res, code, message) => res.status(code).json({ success: false, message });
 
@@ -16,10 +16,79 @@ const parseJson = (v, fallback) => {
   try { return v ? JSON.parse(v) : fallback; } catch (e) { return fallback; }
 };
 
-const saveImage = ({ file, sessionId, staffId, agentId, kind, location, models }) => {
+/**
+ * Parse and validate the customerMet block from a request body.
+ * Returns { ok: true, customerMet, customerNames, metAt, notMetReason }
+ * or      { ok: false, status, message } on validation failure.
+ * Returns { ok: null } when customerMet is absent (older-app path).
+ *
+ * hasVoice: true when a voice file is present (satisfies notMet requirement).
+ */
+const parseCustomerMetBlock = (body, hasVoice = false) => {
+  const rawCm = body.customerMet;
+  if (rawCm === undefined || rawCm === null || rawCm === '') return { ok: null };
+
+  let customerMet;
+  if (rawCm === true  || rawCm === 'true')  customerMet = true;
+  else if (rawCm === false || rawCm === 'false') customerMet = false;
+  else return { ok: false, status: 400, message: 'customerMet must be true or false.' };
+
+  // customerNames: accept JSON string or array; trim; drop empties; cap at 5; each max 60 chars
+  let rawNames = parseJson(body.customerNames, body.customerNames);
+  if (!Array.isArray(rawNames)) rawNames = rawNames ? [String(rawNames)] : [];
+  const customerNames = rawNames
+    .map((n) => String(n).trim().slice(0, 60))
+    .filter((n) => n.length > 0)
+    .slice(0, 5);
+
+  // metAt: valid date only
+  let metAt = null;
+  if (body.metAt !== undefined && body.metAt !== null && body.metAt !== '') {
+    const d = new Date(body.metAt);
+    if (isNaN(d.getTime())) return { ok: false, status: 400, message: 'metAt must be a valid date.' };
+    metAt = d;
+  }
+
+  // notMetReason: trimmed, max 300 chars
+  const notMetReason = String(body.notMetReason || '').trim().slice(0, 300);
+
+  // Business rules
+  if (customerMet === true && customerNames.length === 0) {
+    return { ok: false, status: 400, message: 'At least one customer name is required when customerMet is true.' };
+  }
+  // Not met: valid if notMetReason provided OR a voice note uploaded
+  if (customerMet === false && notMetReason.length === 0 && !hasVoice) {
+    return { ok: false, status: 400, message: 'notMetReason or a voice note is required when customerMet is false.' };
+  }
+
+  return { ok: true, customerMet, customerNames, metAt, notMetReason };
+};
+
+/**
+ * Save a speedometer image. Try Supabase first; fall back to MongoDB binary.
+ * Never throws — on Supabase failure falls back silently to mongo buffer storage.
+ */
+const saveImage = async ({ file, sessionId, branchSlug, staffId, agentId, kind, location, models }) => {
   const actualAgentId = agentId || staffId;
   const evidenceId = `EVID-${Date.now()}-${uuidv4().substring(0, 6)}`;
   const EvidenceModel = models && models.Evidence;
+
+  let storagePath = '';
+  let fileData = file.buffer; // default: store in mongo
+
+  // Try Supabase upload
+  try {
+    const slug = branchSlug || 'default';
+    const remotePath = `${slug}/${sessionId}/${kind.toLowerCase()}-${evidenceId}.jpg`;
+    await storage.uploadFile(PHOTO_BUCKET, remotePath, file.buffer, file.mimetype || 'image/jpeg');
+    storagePath = remotePath;
+    fileData = undefined; // don't store binary in mongo when Supabase succeeds
+  } catch (_err) {
+    // Supabase unavailable — fall back to mongo binary (current behaviour)
+    storagePath = '';
+    fileData = file.buffer;
+  }
+
   return EvidenceModel.create({
     evidenceId,
     sessionId,
@@ -29,27 +98,44 @@ const saveImage = ({ file, sessionId, staffId, agentId, kind, location, models }
     fileName: `${kind.toLowerCase()}-${evidenceId}.jpg`,
     originalName: file.originalname || 'photo.jpg',
     filePath: `/api/v1/recovery/evidence/${evidenceId}/image`,
+    storagePath,
     fileSize: file.size,
     mimeType: file.mimetype,
     caption: kind === 'START_SPEEDOMETER' ? 'Starting speedometer' : 'Ending speedometer',
     latitude: Number(location && location.latitude) || 0,
     longitude: Number(location && location.longitude) || 0,
-    data: file.buffer
+    data: fileData,
   });
+};
+
+/**
+ * Upload voice file to Supabase.
+ * Returns { success: true, voicePath } on success,
+ *         { success: false } on failure (never throws).
+ */
+const saveVoice = async (voiceFile, sessionId, branchSlug) => {
+  if (!voiceFile) return null;
+  try {
+    const slug = branchSlug || 'default';
+    const remotePath = `${slug}/${sessionId}/voice.m4a`;
+    await storage.uploadFile(VOICE_BUCKET, remotePath, voiceFile.buffer, voiceFile.mimetype || 'audio/mp4');
+    return { success: true, voicePath: remotePath };
+  } catch (_err) {
+    return { success: false };
+  }
 };
 
 const errorMessage = (error, fallback) =>
   error && error.name === 'ValidationError' ? error.message : fallback;
 
 // Atomically increment agent statistics after a successful recovery
-// Uses atomic check-and-set on session.statsIncremented to prevent duplicate counts
 async function incrementAgentStats(agentId, distanceMeters, session, models) {
   try {
     const RecoverySessionModel = models && models.RecoverySession;
     const StaffModel = models && models.Staff;
     const sessionDoc = await RecoverySessionModel.findOne({ _id: session._id });
     if (sessionDoc && sessionDoc.statsIncremented) {
-      return; // Already incremented!
+      return;
     }
 
     const updateRes = await RecoverySessionModel.updateOne(
@@ -57,7 +143,7 @@ async function incrementAgentStats(agentId, distanceMeters, session, models) {
       { $set: { statsIncremented: true } }
     );
     if (updateRes.modifiedCount === 0) {
-      return; // Concurrent race prevented
+      return;
     }
 
     const distanceKm = Number(distanceMeters) / 1000 || 0;
@@ -88,7 +174,12 @@ async function incrementAgentStats(agentId, distanceMeters, session, models) {
   }
 }
 
-// POST /recovery/start-with-photo (multipart: startPhoto + fields, or JSON for WALK/OTHER)
+// Derive a URL-safe branch slug from req.branch (e.g. "Branch 1" -> "branch-1")
+function branchSlug(req) {
+  return String(req.branch || 'default').toLowerCase().replace(/\s+/g, '-');
+}
+
+// POST /recovery/start-with-photo
 exports.startWithPhoto = async (req, res) => {
   const { RecoverySession, Assignment, Evidence, TrackingPoint, Staff } = req.models || {};
   let evidence = null;
@@ -117,7 +208,6 @@ exports.startWithPhoto = async (req, res) => {
 
     const deviceSessionId = String(req.body.deviceSessionId || '').trim();
 
-    // Idempotency check: return existing if deviceSessionId was already started
     if (deviceSessionId) {
       const existing = await RecoverySession.findOne({ deviceSessionId });
       if (existing) {
@@ -125,7 +215,6 @@ exports.startWithPhoto = async (req, res) => {
       }
     }
 
-    // Check for existing active session for this agent
     const active = await RecoverySession.findOne({
       $or: [{ agentId }, { staffId }],
       status: 'ACTIVE'
@@ -140,7 +229,16 @@ exports.startWithPhoto = async (req, res) => {
 
     const initialLocation = parseJson(req.body.initialLocation, null);
 
-    // Look up assignments for this agent to link; allow starting without specific cases selected
+    // plannedLocation, plannedPersonCount, plannedNames (new optional fields)
+    const plannedLocation = parseJson(req.body.plannedLocation, null);
+    const plannedPersonCount = req.body.plannedPersonCount !== undefined ? Number(req.body.plannedPersonCount) || 0 : undefined;
+    let rawPlannedNames = parseJson(req.body.plannedNames, req.body.plannedNames);
+    if (!Array.isArray(rawPlannedNames)) rawPlannedNames = rawPlannedNames ? [String(rawPlannedNames)] : [];
+    const plannedNames = rawPlannedNames
+      .map((n) => String(n).trim().slice(0, 60))
+      .filter((n) => n.length > 0)
+      .slice(0, 10);
+
     const idsRaw = parseJson(req.body.assignmentIds, []);
     const ids = [...new Set(idsRaw.map(String).filter((i) => mongoose.Types.ObjectId.isValid(i)))];
 
@@ -161,7 +259,6 @@ exports.startWithPhoto = async (req, res) => {
       }
     }
 
-    // If still no assignment, pick the first active one for this agent as a placeholder
     if (!assignmentId) {
       const fallback = await Assignment.findOne({ $or: [{ agentId }, { staffId }] }).lean();
       if (fallback) {
@@ -180,12 +277,25 @@ exports.startWithPhoto = async (req, res) => {
     }
 
     const sessionId = `SESS-${Date.now()}-${uuidv4().substring(0, 8)}`;
+    const slug = branchSlug(req);
 
     if (req.file) {
       evidence = await saveImage({
-        file: req.file, sessionId, staffId, agentId, kind: 'START_SPEEDOMETER', location: initialLocation, models: req.models
+        file: req.file, sessionId, branchSlug: slug, staffId, agentId, kind: 'START_SPEEDOMETER', location: initialLocation, models: req.models
       });
     }
+
+    // Build planned fields object (only include if provided)
+    const plannedFields = {};
+    if (plannedLocation && (plannedLocation.latitude || plannedLocation.name)) {
+      plannedFields.plannedLocation = {
+        name: String(plannedLocation.name || '').trim().slice(0, 200),
+        latitude: Number(plannedLocation.latitude) || 0,
+        longitude: Number(plannedLocation.longitude) || 0,
+      };
+    }
+    if (plannedPersonCount !== undefined) plannedFields.plannedPersonCount = plannedPersonCount;
+    if (plannedNames.length > 0) plannedFields.plannedNames = plannedNames;
 
     session = await RecoverySession.create({
       sessionId,
@@ -204,6 +314,7 @@ exports.startWithPhoto = async (req, res) => {
       startSpeedometerEvidenceId: evidence ? evidence.evidenceId : '',
       startLocation: rules.pickLocation(initialLocation),
       deviceSessionId,
+      ...plannedFields,
     });
 
     if (initialLocation && initialLocation.latitude) {
@@ -226,7 +337,7 @@ exports.startWithPhoto = async (req, res) => {
   }
 };
 
-// POST /recovery/sessions/:sessionId/finish (multipart: endPhoto + remarks)
+// POST /recovery/sessions/:sessionId/finish
 exports.finishSession = async (req, res) => {
   const { RecoverySession, Assignment, Evidence, TrackingPoint, Staff } = req.models || {};
   try {
@@ -235,8 +346,17 @@ exports.finishSession = async (req, res) => {
     const agentId = (req.agent && req.agent._id) || (req.staff && req.staff._id);
     const staffId = agentId.toString();
 
+    // Voice file (optional)
+    const voiceFile = req.files && req.files.voice && req.files.voice[0];
+    const hasVoice = Boolean(voiceFile);
+
+    // ── customerMet block ─────────────────────────────────────────────────────
+    const cmBlock = parseCustomerMetBlock(req.body, hasVoice);
+    if (cmBlock.ok === false) return fail(res, cmBlock.status, cmBlock.message);
+
+    // Older-app path: customerMet absent → remarks required
     const remarks = String(req.body.remarks || '').trim();
-    if (!remarks) return fail(res, 400, 'Remarks are required.');
+    if (cmBlock.ok === null && !remarks) return fail(res, 400, 'Remarks are required.');
 
     const session = await RecoverySession.findOne({
       sessionId,
@@ -244,39 +364,51 @@ exports.finishSession = async (req, res) => {
     });
     if (!session) return fail(res, 404, 'Recovery session not found or access denied.');
     if (session.status !== 'ACTIVE') {
-      // Idempotent — already finished
       return res.status(200).json({ success: true, message: 'This recovery is already finished.', session });
     }
 
-    // Only BIKE and CAR require end photo; WALK and OTHER do not
+    // Only BIKE and CAR require end photo
     const vehicleType = String(session.vehicleType || '').toUpperCase();
     const needsEndPhoto = vehicleType === 'BIKE' || vehicleType === 'CAR';
-    if (needsEndPhoto && !req.file) return fail(res, 400, 'Ending speedometer photo is required.');
+
+    // endPhoto comes via req.file (set by safeFinishWithVoice) or req.files.endPhoto
+    const endPhotoFile = req.file ||
+      (req.files && req.files.endPhoto && req.files.endPhoto[0]);
+    if (needsEndPhoto && !endPhotoFile) return fail(res, 400, 'Ending speedometer photo is required.');
 
     const endLocation = parseJson(req.body.endLocation, null);
+    const slug = branchSlug(req);
 
     let evidence = null;
-    if (req.file) {
-      evidence = await saveImage({ file: req.file, sessionId, staffId, agentId, kind: 'END_SPEEDOMETER', location: endLocation, models: req.models });
-    }
-
-    let nlpSummary, nlpCategory, nlpDetails;
-    try {
-      ({ nlpSummary, nlpCategory, nlpDetails } = summarize(remarks));
-    } catch (_e) {
-      nlpSummary = ''; nlpCategory = 'GENERAL';
-      nlpDetails = { names: [], amounts: [], dates: [], phones: [], keyPoints: [] };
+    if (endPhotoFile) {
+      evidence = await saveImage({ file: endPhotoFile, sessionId, branchSlug: slug, staffId, agentId, kind: 'END_SPEEDOMETER', location: endLocation, models: req.models });
     }
 
     const endTime = new Date();
     session.endTime = endTime;
     session.status = 'COMPLETED';
-    session.remarks = remarks;
-    session.rawRemarks = remarks;
-    session.visitNotes = remarks;
-    session.nlpSummary = nlpSummary;
-    session.nlpCategory = nlpCategory;
-    session.nlpDetails = nlpDetails;
+
+    if (cmBlock.ok === true) {
+      session.customerMet = cmBlock.customerMet;
+      session.customerNames = cmBlock.customerNames;
+      session.metAt = cmBlock.metAt;
+      session.notMetReason = cmBlock.notMetReason;
+    } else {
+      let nlpSummary, nlpCategory, nlpDetails;
+      try {
+        ({ nlpSummary, nlpCategory, nlpDetails } = summarize(remarks));
+      } catch (_e) {
+        nlpSummary = ''; nlpCategory = 'GENERAL';
+        nlpDetails = { names: [], amounts: [], dates: [], phones: [], keyPoints: [] };
+      }
+      session.remarks = remarks;
+      session.rawRemarks = remarks;
+      session.visitNotes = remarks;
+      session.nlpSummary = nlpSummary;
+      session.nlpCategory = nlpCategory;
+      session.nlpDetails = nlpDetails;
+    }
+
     if (evidence) session.endSpeedometerEvidenceId = evidence.evidenceId;
     session.durationSeconds = Number(req.body.durationSeconds) ||
       Math.round((endTime.getTime() - new Date(session.startTime).getTime()) / 1000);
@@ -298,11 +430,28 @@ exports.finishSession = async (req, res) => {
     if (req.body.endAddress !== undefined && req.body.endAddress !== null) {
       session.endAddress = String(req.body.endAddress).trim().slice(0, 300);
     }
+
+    // Voice upload (never fails the save unless voice required and upload fails)
+    const voiceResult = await saveVoice(voiceFile, sessionId, slug);
+    if (hasVoice && voiceResult && !voiceResult.success) {
+      // Upload failed — only block if there is no notMetReason to fall back on
+      const notMetReason = cmBlock.ok === true ? (cmBlock.notMetReason || '') : String(req.body.notMetReason || '').trim();
+      if (!notMetReason) {
+        return res.status(503).json({ success: false, retryable: true, message: 'Voice upload failed. Please retry.' });
+      }
+      // notMetReason exists: finish normally, skip voice
+    }
+    if (voiceResult && voiceResult.voicePath) {
+      session.voicePath = voiceResult.voicePath;
+      if (req.body.voiceDurationSeconds !== undefined) {
+        session.voiceDurationSeconds = Number(req.body.voiceDurationSeconds) || 0;
+      }
+    }
+
     const finalLocation = rules.pickLocation(endLocation);
     if (finalLocation) session.endLocation = finalLocation;
     await session.save();
 
-    // Update assignments verifying agent ownership
     const caseIds = (session.cases && session.cases.length
       ? session.cases.map((c) => c.assignmentId)
       : [session.assignmentId]).filter(Boolean);
@@ -313,7 +462,6 @@ exports.finishSession = async (req, res) => {
       ).catch(() => {});
     }
 
-    // Atomically increment agent stats (duplicate-safe)
     await incrementAgentStats(agentId, session.distanceMeters, session, req.models);
 
     return res.status(200).json({ success: true, message: 'Recovery submitted.', session });
@@ -323,7 +471,7 @@ exports.finishSession = async (req, res) => {
   }
 };
 
-// POST /recovery/sessions/:sessionId/finish-walk (JSON body, no photo — Walk & Other modes)
+// POST /recovery/sessions/:sessionId/finish-walk
 exports.finishSessionWalk = async (req, res) => {
   const { RecoverySession, Assignment, Evidence, TrackingPoint, Staff } = req.models || {};
   try {
@@ -341,33 +489,50 @@ exports.finishSessionWalk = async (req, res) => {
       return res.status(200).json({ success: true, message: 'This recovery is already finished.', session });
     }
 
-    // Strict validation: BIKE and CAR must not bypass photo via finish-walk
     const vehicleType = String(session.vehicleType || '').toUpperCase();
     if (vehicleType === 'BIKE' || vehicleType === 'CAR') {
       return fail(res, 400, 'Ending speedometer photo is required for Bike/Car recovery. Use the finish endpoint with photo.');
     }
 
+    // Voice file (optional)
+    const voiceFile = req.files && req.files.voice && req.files.voice[0];
+    const hasVoice = Boolean(voiceFile);
+
+    // ── customerMet block ─────────────────────────────────────────────────────
+    const cmBlock = parseCustomerMetBlock(req.body, hasVoice);
+    if (cmBlock.ok === false) return fail(res, cmBlock.status, cmBlock.message);
+
     const remarks = String(req.body.remarks || '').trim();
-    if (!remarks) return fail(res, 400, 'Remarks are required.');
+    if (cmBlock.ok === null && !remarks) return fail(res, 400, 'Remarks are required.');
 
     const endLocation = parseJson(req.body.endLocation, null);
-    let nlpSummary, nlpCategory, nlpDetails;
-    try {
-      ({ nlpSummary, nlpCategory, nlpDetails } = summarize(remarks));
-    } catch (_e) {
-      nlpSummary = ''; nlpCategory = 'GENERAL';
-      nlpDetails = { names: [], amounts: [], dates: [], phones: [], keyPoints: [] };
-    }
+    const slug = branchSlug(req);
 
     const endTime = new Date();
     session.endTime = endTime;
     session.status = 'COMPLETED';
-    session.remarks = remarks;
-    session.rawRemarks = remarks;
-    session.visitNotes = remarks;
-    session.nlpSummary = nlpSummary;
-    session.nlpCategory = nlpCategory;
-    session.nlpDetails = nlpDetails;
+
+    if (cmBlock.ok === true) {
+      session.customerMet = cmBlock.customerMet;
+      session.customerNames = cmBlock.customerNames;
+      session.metAt = cmBlock.metAt;
+      session.notMetReason = cmBlock.notMetReason;
+    } else {
+      let nlpSummary, nlpCategory, nlpDetails;
+      try {
+        ({ nlpSummary, nlpCategory, nlpDetails } = summarize(remarks));
+      } catch (_e) {
+        nlpSummary = ''; nlpCategory = 'GENERAL';
+        nlpDetails = { names: [], amounts: [], dates: [], phones: [], keyPoints: [] };
+      }
+      session.remarks = remarks;
+      session.rawRemarks = remarks;
+      session.visitNotes = remarks;
+      session.nlpSummary = nlpSummary;
+      session.nlpCategory = nlpCategory;
+      session.nlpDetails = nlpDetails;
+    }
+
     session.durationSeconds = Number(req.body.durationSeconds) ||
       Math.round((endTime.getTime() - new Date(session.startTime).getTime()) / 1000);
     if (req.body.distanceMeters !== undefined) {
@@ -388,6 +553,22 @@ exports.finishSessionWalk = async (req, res) => {
     if (req.body.endAddress !== undefined && req.body.endAddress !== null) {
       session.endAddress = String(req.body.endAddress).trim().slice(0, 300);
     }
+
+    // Voice upload
+    const voiceResult = await saveVoice(voiceFile, sessionId, slug);
+    if (hasVoice && voiceResult && !voiceResult.success) {
+      const notMetReason = cmBlock.ok === true ? (cmBlock.notMetReason || '') : String(req.body.notMetReason || '').trim();
+      if (!notMetReason) {
+        return res.status(503).json({ success: false, retryable: true, message: 'Voice upload failed. Please retry.' });
+      }
+    }
+    if (voiceResult && voiceResult.voicePath) {
+      session.voicePath = voiceResult.voicePath;
+      if (req.body.voiceDurationSeconds !== undefined) {
+        session.voiceDurationSeconds = Number(req.body.voiceDurationSeconds) || 0;
+      }
+    }
+
     const finalLocation = rules.pickLocation(endLocation);
     if (finalLocation) session.endLocation = finalLocation;
     await session.save();
@@ -402,7 +583,6 @@ exports.finishSessionWalk = async (req, res) => {
       ).catch(() => {});
     }
 
-    // Atomically increment agent stats
     await incrementAgentStats(agentId, session.distanceMeters, session, req.models);
 
     return res.status(200).json({ success: true, message: 'Recovery submitted.', session });
@@ -412,7 +592,7 @@ exports.finishSessionWalk = async (req, res) => {
   }
 };
 
-// GET /recovery/history — returns all completed sessions for this agent (excluding rawRemarks)
+// GET /recovery/history
 exports.getHistory = async (req, res) => {
   const { RecoverySession, Assignment, Evidence, TrackingPoint, Staff } = req.models || {};
   try {
@@ -426,7 +606,7 @@ exports.getHistory = async (req, res) => {
     })
       .sort({ endTime: -1 })
       .limit(200)
-      .select('-rawRemarks -remarks -visitNotes') // Do NOT expose raw remarks to frontend
+      .select('-rawRemarks -remarks -visitNotes')
       .lean();
 
     return res.status(200).json({ success: true, sessions });
@@ -436,7 +616,7 @@ exports.getHistory = async (req, res) => {
   }
 };
 
-// POST /recovery/sync — accepts a completed offline session and saves/reconciles it
+// POST /recovery/sync
 exports.syncOfflineSession = async (req, res) => {
   const { RecoverySession, Assignment, Evidence, TrackingPoint, Staff } = req.models || {};
   try {
@@ -448,21 +628,21 @@ exports.syncOfflineSession = async (req, res) => {
     const deviceSessionId = String(body.deviceSessionId || '').trim();
     if (!deviceSessionId) return fail(res, 400, 'deviceSessionId is required for sync.');
 
-    // Look for files uploaded via multipart fields
     const startPhotoFile = (req.files && req.files.startPhoto && req.files.startPhoto[0]) ||
       (req.file && req.file.fieldname === 'startPhoto' ? req.file : null);
     const endPhotoFile = (req.files && req.files.endPhoto && req.files.endPhoto[0]) ||
       (req.file && req.file.fieldname === 'endPhoto' ? req.file : null);
+    const voiceFile = req.files && req.files.voice && req.files.voice[0];
+    const hasVoice = Boolean(voiceFile);
+    const slug = branchSlug(req);
 
     // ── CASE 1: Session already exists in DB ──────────────────────────────────
     const existing = await RecoverySession.findOne({ deviceSessionId });
     if (existing) {
       if (existing.status === 'COMPLETED') {
-        // Idempotency: already synced and completed
         return res.status(200).json({ success: true, alreadySynced: true, session: existing });
       }
 
-      // Session exists but was ACTIVE (started online, finished offline)
       const vehicleType = String(existing.vehicleType || '').toUpperCase();
       const needsPhoto = vehicleType === 'BIKE' || vehicleType === 'CAR';
 
@@ -475,6 +655,7 @@ exports.syncOfflineSession = async (req, res) => {
         const endEv = await saveImage({
           file: endPhotoFile,
           sessionId: existing.sessionId,
+          branchSlug: slug,
           staffId,
           agentId,
           kind: 'END_SPEEDOMETER',
@@ -484,24 +665,37 @@ exports.syncOfflineSession = async (req, res) => {
         existing.endSpeedometerEvidenceId = endEv.evidenceId;
       }
 
-      const remarks = String(body.remarks || body.rawRemarks || existing.remarks || '').trim();
-      if (!remarks) return fail(res, 400, 'Customer visit remarks are required.');
+      // ── customerMet block ─────────────────────────────────────────────────
+      const cmBlock1 = parseCustomerMetBlock(body, hasVoice);
+      if (cmBlock1.ok === false) return fail(res, cmBlock1.status, cmBlock1.message);
 
-      let nlpSummary, nlpCategory, nlpDetails;
-      try {
-        ({ nlpSummary, nlpCategory, nlpDetails } = summarize(remarks));
-      } catch (_e) {
-        nlpSummary = ''; nlpCategory = 'GENERAL';
-        nlpDetails = { names: [], amounts: [], dates: [], phones: [], keyPoints: [] };
-      }
+      const remarks = String(body.remarks || body.rawRemarks || existing.remarks || '').trim();
+      if (cmBlock1.ok === null && !remarks) return fail(res, 400, 'Customer visit remarks are required.');
+
       existing.endTime = body.endTime ? new Date(body.endTime) : new Date();
       existing.status = 'COMPLETED';
-      existing.remarks = remarks;
-      existing.rawRemarks = remarks;
-      existing.visitNotes = remarks;
-      existing.nlpSummary = nlpSummary;
-      existing.nlpCategory = nlpCategory;
-      existing.nlpDetails = nlpDetails;
+
+      if (cmBlock1.ok === true) {
+        existing.customerMet = cmBlock1.customerMet;
+        existing.customerNames = cmBlock1.customerNames;
+        existing.metAt = cmBlock1.metAt;
+        existing.notMetReason = cmBlock1.notMetReason;
+      } else {
+        let nlpSummary, nlpCategory, nlpDetails;
+        try {
+          ({ nlpSummary, nlpCategory, nlpDetails } = summarize(remarks));
+        } catch (_e) {
+          nlpSummary = ''; nlpCategory = 'GENERAL';
+          nlpDetails = { names: [], amounts: [], dates: [], phones: [], keyPoints: [] };
+        }
+        existing.remarks = remarks;
+        existing.rawRemarks = remarks;
+        existing.visitNotes = remarks;
+        existing.nlpSummary = nlpSummary;
+        existing.nlpCategory = nlpCategory;
+        existing.nlpDetails = nlpDetails;
+      }
+
       if (body.durationSeconds !== undefined) existing.durationSeconds = Number(body.durationSeconds) || 0;
       if (body.distanceMeters !== undefined) existing.distanceMeters = Number(body.distanceMeters) || 0;
       if (body.movingSeconds !== undefined && body.movingSeconds !== null && body.movingSeconds !== '') {
@@ -519,12 +713,27 @@ exports.syncOfflineSession = async (req, res) => {
       if (body.endAddress !== undefined && body.endAddress !== null) {
         existing.endAddress = String(body.endAddress).trim().slice(0, 300);
       }
+
+      // Voice upload
+      const voiceResult1 = await saveVoice(voiceFile, existing.sessionId, slug);
+      if (hasVoice && voiceResult1 && !voiceResult1.success) {
+        const notMetReason1 = cmBlock1.ok === true ? (cmBlock1.notMetReason || '') : String(body.notMetReason || '').trim();
+        if (!notMetReason1) {
+          return res.status(503).json({ success: false, retryable: true, message: 'Voice upload failed. Please retry.' });
+        }
+      }
+      if (voiceResult1 && voiceResult1.voicePath) {
+        existing.voicePath = voiceResult1.voicePath;
+        if (body.voiceDurationSeconds !== undefined) {
+          existing.voiceDurationSeconds = Number(body.voiceDurationSeconds) || 0;
+        }
+      }
+
       const finalLoc = rules.pickLocation(endLoc);
       if (finalLoc) existing.endLocation = finalLoc;
 
       await existing.save();
 
-      // Persist any tracking points passed in sync payload
       const rawPoints = parseJson(body.points, []);
       if (Array.isArray(rawPoints) && rawPoints.length > 0) {
         const ptDocs = rawPoints.map(p => ({
@@ -573,8 +782,12 @@ exports.syncOfflineSession = async (req, res) => {
       }
     }
 
+    // ── customerMet block ─────────────────────────────────────────────────
+    const cmBlock2 = parseCustomerMetBlock(body, hasVoice);
+    if (cmBlock2.ok === false) return fail(res, cmBlock2.status, cmBlock2.message);
+
     const remarks = String(body.remarks || body.rawRemarks || '').trim();
-    if (!remarks) return fail(res, 400, 'Customer visit remarks are required.');
+    if (cmBlock2.ok === null && !remarks) return fail(res, 400, 'Customer visit remarks are required.');
 
     const sessionId = (body.sessionId && String(body.sessionId).startsWith('SESS-'))
       ? String(body.sessionId)
@@ -590,6 +803,7 @@ exports.syncOfflineSession = async (req, res) => {
       startEvidence = await saveImage({
         file: startPhotoFile,
         sessionId,
+        branchSlug: slug,
         staffId,
         agentId,
         kind: 'START_SPEEDOMETER',
@@ -602,20 +816,13 @@ exports.syncOfflineSession = async (req, res) => {
       endEvidence = await saveImage({
         file: endPhotoFile,
         sessionId,
+        branchSlug: slug,
         staffId,
         agentId,
         kind: 'END_SPEEDOMETER',
         location: endLoc,
         models: req.models
       });
-    }
-
-    let nlpSummary, nlpCategory, nlpDetails;
-    try {
-      ({ nlpSummary, nlpCategory, nlpDetails } = summarize(remarks));
-    } catch (_e) {
-      nlpSummary = ''; nlpCategory = 'GENERAL';
-      nlpDetails = { names: [], amounts: [], dates: [], phones: [], keyPoints: [] };
     }
 
     let assignmentId = body.assignmentId;
@@ -632,6 +839,47 @@ exports.syncOfflineSession = async (req, res) => {
         assignmentId = agentId;
         customerId = agentId;
         loanId = agentId;
+      }
+    }
+
+    let createPayload;
+    if (cmBlock2.ok === true) {
+      createPayload = {
+        customerMet: cmBlock2.customerMet,
+        customerNames: cmBlock2.customerNames,
+        metAt: cmBlock2.metAt,
+        notMetReason: cmBlock2.notMetReason,
+      };
+    } else {
+      let nlpSummary, nlpCategory, nlpDetails;
+      try {
+        ({ nlpSummary, nlpCategory, nlpDetails } = summarize(remarks));
+      } catch (_e) {
+        nlpSummary = ''; nlpCategory = 'GENERAL';
+        nlpDetails = { names: [], amounts: [], dates: [], phones: [], keyPoints: [] };
+      }
+      createPayload = {
+        remarks,
+        rawRemarks: remarks,
+        visitNotes: remarks,
+        nlpSummary,
+        nlpCategory,
+        nlpDetails,
+      };
+    }
+
+    // Voice upload before create
+    const voiceResult2 = await saveVoice(voiceFile, sessionId, slug);
+    if (hasVoice && voiceResult2 && !voiceResult2.success) {
+      const notMetReason2 = cmBlock2.ok === true ? (cmBlock2.notMetReason || '') : String(body.notMetReason || '').trim();
+      if (!notMetReason2) {
+        return res.status(503).json({ success: false, retryable: true, message: 'Voice upload failed. Please retry.' });
+      }
+    }
+    if (voiceResult2 && voiceResult2.voicePath) {
+      createPayload.voicePath = voiceResult2.voicePath;
+      if (body.voiceDurationSeconds !== undefined) {
+        createPayload.voiceDurationSeconds = Number(body.voiceDurationSeconds) || 0;
       }
     }
 
@@ -656,20 +904,14 @@ exports.syncOfflineSession = async (req, res) => {
       unknownSeconds: (body.unknownSeconds !== undefined && body.unknownSeconds !== null && body.unknownSeconds !== '') ? Number(body.unknownSeconds) : null,
       startAddress: body.startAddress ? String(body.startAddress).trim().slice(0, 300) : '',
       endAddress: body.endAddress ? String(body.endAddress).trim().slice(0, 300) : '',
-      remarks,
-      rawRemarks: remarks,
-      visitNotes: remarks,
-      nlpSummary,
-      nlpCategory,
-      nlpDetails,
       startSpeedometerEvidenceId: startEvidence ? startEvidence.evidenceId : '',
       endSpeedometerEvidenceId: endEvidence ? endEvidence.evidenceId : '',
       startLocation: rules.pickLocation(startLoc),
       endLocation: rules.pickLocation(endLoc),
       area: body.area || '',
+      ...createPayload,
     });
 
-    // Persist GPS tracking points
     const rawPoints = parseJson(body.points, []);
     if (Array.isArray(rawPoints) && rawPoints.length > 0) {
       const ptDocs = rawPoints.map(p => ({
@@ -691,7 +933,6 @@ exports.syncOfflineSession = async (req, res) => {
       }
     }
 
-    // Verify assignment ownership on update
     if (assignmentId && assignmentId !== agentId) {
       await Assignment.updateOne(
         { _id: assignmentId, $or: [{ agentId }, { staffId }] },
@@ -699,7 +940,6 @@ exports.syncOfflineSession = async (req, res) => {
       ).catch(() => {});
     }
 
-    // Atomically increment agent stats
     await incrementAgentStats(agentId, session.distanceMeters, session, req.models);
 
     return res.status(201).json({ success: true, session });
@@ -709,7 +949,7 @@ exports.syncOfflineSession = async (req, res) => {
   }
 };
 
-// GET /recovery/stats — returns agent's recovery statistics
+// GET /recovery/stats
 exports.getAgentStats = async (req, res) => {
   const { RecoverySession, Assignment, Evidence, TrackingPoint, Staff } = req.models || {};
   try {
@@ -717,7 +957,6 @@ exports.getAgentStats = async (req, res) => {
     const agentId = (req.agent && req.agent._id) || (req.staff && req.staff._id);
     const staffId = agentId.toString();
 
-    // Count directly from RecoverySessions for accuracy
     const [count, distResult] = await Promise.all([
       RecoverySession.countDocuments({
         $or: [{ agentId }, { staffId }],
@@ -743,3 +982,53 @@ exports.getAgentStats = async (req, res) => {
     return fail(res, 500, 'Could not fetch agent stats.');
   }
 };
+
+// GET /recovery/sessions/:sessionId/voice-url
+exports.getVoiceUrl = async (req, res) => {
+  const { RecoverySession } = req.models || {};
+  try {
+    if (!req.models && !getIsConnected()) return fail(res, 503, 'Database not connected.');
+    const agentId = (req.agent && req.agent._id) || (req.staff && req.staff._id);
+    const staffId = agentId.toString();
+    const { sessionId } = req.params;
+
+    const session = await RecoverySession.findOne({
+      sessionId,
+      $or: [{ agentId }, { staffId }]
+    }).lean();
+    if (!session) return fail(res, 404, 'Session not found or access denied.');
+    if (!session.voicePath) return fail(res, 404, 'No voice recording for this session.');
+
+    const url = await storage.getSignedUrl(VOICE_BUCKET, session.voicePath, 300);
+    return res.status(200).json({ success: true, url, expiresIn: 300 });
+  } catch (error) {
+    console.error('getVoiceUrl error:', error.message);
+    return fail(res, 500, 'Could not generate voice URL.');
+  }
+};
+
+// GET /recovery/evidence/:evidenceId/url
+exports.getEvidenceUrl = async (req, res) => {
+  const { Evidence } = req.models || {};
+  try {
+    if (!req.models && !getIsConnected()) return fail(res, 503, 'Database not connected.');
+    const agentId = (req.agent && req.agent._id) || (req.staff && req.staff._id);
+    const staffId = agentId.toString();
+
+    const ev = await Evidence.findOne({ evidenceId: req.params.evidenceId }).lean();
+    if (!ev) return fail(res, 404, 'Evidence not found.');
+
+    const isOwner = ev.staffId.toString() === staffId || ev.agentId?.toString() === staffId;
+    if (!isOwner) return fail(res, 403, 'Not allowed to access this evidence.');
+    if (!ev.storagePath) return fail(res, 404, 'No cloud storage path for this evidence.');
+
+    const url = await storage.getSignedUrl(PHOTO_BUCKET, ev.storagePath, 300);
+    return res.status(200).json({ success: true, url, expiresIn: 300 });
+  } catch (error) {
+    console.error('getEvidenceUrl error:', error.message);
+    return fail(res, 500, 'Could not generate evidence URL.');
+  }
+};
+
+
+

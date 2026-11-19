@@ -16,6 +16,7 @@ const evidenceSchema = new mongoose.Schema(
     latitude: { type: Number, default: 0 },
     longitude: { type: Number, default: 0 },
     capturedAt: { type: Date, default: Date.now },
+    storagePath: { type: String, default: '' },
     data: { type: Buffer, select: false }
   },
   { timestamps: true }
