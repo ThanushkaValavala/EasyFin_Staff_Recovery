@@ -583,7 +583,7 @@ export default function CompleteScreen({ route, navigation }) {
     Alert.alert(
       'Recovery Completed',
       'The recovery session has been successfully saved to the server.',
-      [{ text: 'OK', onPress: () => navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] }) }]
+      [{ text: 'OK', onPress: () => navigation.reset({ index: 1, routes: [{ name: 'MainTabs' }, { name: 'Tasks' }] }) }]
     );
   };
 
@@ -680,6 +680,8 @@ export default function CompleteScreen({ route, navigation }) {
       } else {
         // Multipart: photo and/or voice
         const fields = {
+          customerId: route.params?.customerId || session?.customerRefId || '',
+          customerRefId: route.params?.customerId || session?.customerRefId || '',
           remarks: remarksText,
           customerMet: String(customerMet),
           customerNames: JSON.stringify(customerNames),
@@ -774,7 +776,7 @@ export default function CompleteScreen({ route, navigation }) {
           Alert.alert(
             'Saved Offline',
             'Network is unavailable. Your recovery has been saved on this device and will automatically sync to the server when connection is restored.',
-            [{ text: 'OK', onPress: () => navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] }) }]
+            [{ text: 'OK', onPress: () => navigation.reset({ index: 1, routes: [{ name: 'MainTabs' }, { name: 'Tasks' }] }) }]
           );
         } catch (saveErr) {
           Alert.alert('Error', 'Could not save recovery locally: ' + (saveErr.message || 'Storage error'));

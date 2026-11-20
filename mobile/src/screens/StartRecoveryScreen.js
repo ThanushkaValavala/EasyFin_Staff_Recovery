@@ -77,16 +77,24 @@ export default function StartRecoveryScreen({ route, navigation }) {
   const [error, setError] = useState('');
 
   // ── Planned Location ──────────────────────────────────────────────────────
-  const [locationQuery, setLocationQuery] = useState('');
+  const initialPlannedLoc = route?.params?.plannedLocation || (route?.params?.customer ? {
+    name: route.params.customer.fullAddress || route.params.customer.location || 'Customer Address',
+    latitude: route.params.customer.latitude || 0,
+    longitude: route.params.customer.longitude || 0
+  } : null);
+  const initialPersonCount = route?.params?.plannedPersonCount ? String(route.params.plannedPersonCount) : (route?.params?.customer ? '1' : '');
+  const initialNames = route?.params?.plannedNames || (route?.params?.customer?.customerName ? [route.params.customer.customerName] : (route?.params?.customer?.name ? [route.params.customer.name] : []));
+
+  const [locationQuery, setLocationQuery] = useState(initialPlannedLoc?.name || '');
   const [locationSuggestions, setLocationSuggestions] = useState([]);
-  const [plannedLocation, setPlannedLocation] = useState(null); // { name, latitude, longitude }
+  const [plannedLocation, setPlannedLocation] = useState(initialPlannedLoc); // { name, latitude, longitude }
   const [locationLoading, setLocationLoading] = useState(false);
   const [locationError, setLocationError] = useState('');
   const debounceRef = useRef(null);
 
   // ── Person count & names ──────────────────────────────────────────────────
-  const [plannedPersonCount, setPlannedPersonCount] = useState('');
-  const [plannedNames, setPlannedNames] = useState([]);
+  const [plannedPersonCount, setPlannedPersonCount] = useState(initialPersonCount);
+  const [plannedNames, setPlannedNames] = useState(initialNames);
 
   // Device-side session ID for idempotency & offline safety
   const deviceSessionId = useRef(generateDeviceSessionId()).current;
@@ -349,6 +357,9 @@ export default function StartRecoveryScreen({ route, navigation }) {
         plannedLocation: JSON.stringify(plannedLocation),
         plannedPersonCount: String(personCount),
         plannedNames: JSON.stringify(trimmedNames),
+        customerId: route?.params?.customerId || route?.params?.customer?.customerId || '',
+        customerRefId: route?.params?.customer?.customerId || route?.params?.customerId || '',
+        customerName: route?.params?.customer?.customerName || route?.params?.customer?.name || '',
       };
 
       let data;
@@ -362,6 +373,9 @@ export default function StartRecoveryScreen({ route, navigation }) {
           plannedLocation,
           plannedPersonCount: personCount,
           plannedNames: trimmedNames,
+          customerId: route?.params?.customerId || route?.params?.customer?.customerId || '',
+          customerRefId: route?.params?.customer?.customerId || route?.params?.customerId || '',
+          customerName: route?.params?.customer?.customerName || route?.params?.customer?.name || '',
         });
       } else {
         // BIKE / CAR: multipart with starting speedometer photo
@@ -402,6 +416,8 @@ export default function StartRecoveryScreen({ route, navigation }) {
         plannedLocation,
         plannedPersonCount: personCount,
         plannedNames: trimmedNames,
+        customer: route?.params?.customer,
+        customerId: route?.params?.customerId || route?.params?.customer?.customerId,
       });
 
     } catch (e) {

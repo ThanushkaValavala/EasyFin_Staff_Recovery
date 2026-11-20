@@ -12,6 +12,7 @@ const authRoutes = require('./routes/authRoutes');
 const agentRoutes = require('./routes/agentRoutes');
 const caseRoutes = require('./routes/caseRoutes');
 const recoveryRoutes = require('./routes/recoveryRoutes');
+const taskRoutes = require('./routes/taskRoutes');
 const reportRoutes = require('./routes/reportRoutes');
 const analyticsRoutes = require('./routes/analyticsRoutes');
 
@@ -49,6 +50,7 @@ app.use('/api/v1/agent', agentRoutes);
 app.use('/api/v1/cases', caseRoutes);
 app.use('/api/v1/assignments', caseRoutes); // Alias for specification: GET /assignments
 app.use('/api/v1/recovery', recoveryRoutes);
+app.use('/api/v1/tasks', taskRoutes);
 app.get('/api/v1/places/search', protect, places.searchPlaces);
 app.get('/api/v1/places/reverse', protect, places.reverseGeocode);
 app.use('/api/v1/reports', reportRoutes);

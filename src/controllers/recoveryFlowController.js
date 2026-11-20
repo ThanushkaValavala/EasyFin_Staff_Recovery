@@ -289,6 +289,16 @@ exports.startWithPhoto = async (req, res) => {
       status: 'ACTIVE'
     });
     if (active) {
+      const matchSession = req.body.sessionId && active.sessionId === req.body.sessionId;
+      const matchCust = (req.body.customerId || req.body.customerRefId) &&
+        (active.customerRefId === req.body.customerId || active.customerRefId === req.body.customerRefId);
+      if (matchSession || matchCust) {
+        if (vehicleTypeRaw) active.vehicleType = vehicleTypeRaw;
+        if (vehicleNumber) active.vehicleNumber = vehicleNumber;
+        if (evidence) active.startSpeedometerEvidenceId = evidence.evidenceId;
+        await active.save();
+        return res.status(200).json({ success: true, message: 'Active recovery updated with transport details.', session: active });
+      }
       return res.status(409).json({
         success: false,
         message: 'You already have an active recovery. Finish it first.',
@@ -345,6 +355,23 @@ exports.startWithPhoto = async (req, res) => {
       cases = [];
     }
 
+    let customerRefId = String(req.body.customerRefId || '').trim();
+    let customerName = String(req.body.customerName || '').trim();
+    if ((req.body.customerId || req.body.customerRefId) && req.models && req.models.Customer) {
+      const searchTarget = req.body.customerId || req.body.customerRefId;
+      const custObj = await req.models.Customer.findOne({
+        $or: [
+          { customerId: searchTarget },
+          ...(mongoose.Types.ObjectId.isValid(searchTarget) ? [{ _id: searchTarget }] : [])
+        ]
+      }).lean();
+      if (custObj) {
+        customerId = custObj._id;
+        customerRefId = custObj.customerId;
+        customerName = custObj.customerName || custObj.name;
+      }
+    }
+
     const sessionId = `SESS-${Date.now()}-${uuidv4().substring(0, 8)}`;
     const slug = branchSlug(req);
 
@@ -372,6 +399,8 @@ exports.startWithPhoto = async (req, res) => {
       staffId,
       assignmentId,
       customerId,
+      customerRefId: customerRefId || '',
+      customerName: customerName || '',
       loanId,
       cases,
       area: String(req.body.area || '').trim(),
@@ -521,6 +550,18 @@ exports.finishSession = async (req, res) => {
     if (finalLocation) session.endLocation = finalLocation;
     await session.save();
 
+    if (req.models && req.models.Customer) {
+      const custQuery = session.customerRefId
+        ? { customerId: session.customerRefId }
+        : (session.customerId && mongoose.Types.ObjectId.isValid(session.customerId)
+            ? { _id: session.customerId }
+            : { activeRecoverySessionId: session.sessionId });
+      await req.models.Customer.updateOne(
+        custQuery,
+        { $set: { sessionSubmittedAt: endTime } }
+      ).catch(() => {});
+    }
+
     const caseIds = (session.cases && session.cases.length
       ? session.cases.map((c) => c.assignmentId)
       : [session.assignmentId]).filter(Boolean);
@@ -643,6 +684,18 @@ exports.finishSessionWalk = async (req, res) => {
     const finalLocation = rules.pickLocation(endLocation);
     if (finalLocation) session.endLocation = finalLocation;
     await session.save();
+
+    if (req.models && req.models.Customer) {
+      const custQuery = session.customerRefId
+        ? { customerId: session.customerRefId }
+        : (session.customerId && mongoose.Types.ObjectId.isValid(session.customerId)
+            ? { _id: session.customerId }
+            : { activeRecoverySessionId: session.sessionId });
+      await req.models.Customer.updateOne(
+        custQuery,
+        { $set: { sessionSubmittedAt: endTime } }
+      ).catch(() => {});
+    }
 
     const caseIds = (session.cases && session.cases.length
       ? session.cases.map((c) => c.assignmentId)
