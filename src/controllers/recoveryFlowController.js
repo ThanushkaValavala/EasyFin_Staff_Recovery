@@ -108,6 +108,62 @@ const saveImage = async ({ file, sessionId, branchSlug, staffId, agentId, kind, 
   });
 };
 
+const getAudioContentTypeFromFilename = (filename) => {
+  const match = String(filename || '').toLowerCase().match(/\.([a-z0-9]+)$/);
+  const ext = match ? `.${match[1]}` : '';
+  switch (ext) {
+    case '.m4a':
+    case '.mp4':
+      return 'audio/mp4';
+    case '.aac':
+      return 'audio/aac';
+    case '.mp3':
+      return 'audio/mpeg';
+    case '.wav':
+      return 'audio/wav';
+    case '.caf':
+      return 'audio/x-caf';
+    default:
+      return 'audio/mp4';
+  }
+};
+
+const resolveVoiceContentType = (voiceFile) => {
+  const rawType = (voiceFile && voiceFile.mimetype ? String(voiceFile.mimetype).trim().toLowerCase() : '');
+  const isMissing = !rawType;
+  const isOctetStream = rawType === 'application/octet-stream';
+  const isM4aVariant = rawType === 'audio/m4a' ||
+    rawType === 'audio/x-m4a' ||
+    rawType === 'audio/mp4' ||
+    rawType === 'audio/mp4a-latm' ||
+    rawType.startsWith('audio/m4a;') ||
+    rawType.startsWith('audio/x-m4a;') ||
+    rawType.startsWith('audio/mp4;') ||
+    rawType.startsWith('audio/mp4a-latm;');
+
+  if (isMissing || isOctetStream || isM4aVariant) {
+    const filename = (voiceFile && (voiceFile.originalname || voiceFile.name || voiceFile.filename)) || '';
+    return getAudioContentTypeFromFilename(filename);
+  }
+  return rawType;
+};
+
+const logVoiceUploadError = (err) => {
+  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY || (err && err.message === 'Supabase not configured')) {
+    console.error('[voice] storage not configured');
+    return;
+  }
+  const errObj = (err instanceof Error)
+    ? err
+    : (err && err.error instanceof Error)
+      ? err.error
+      : null;
+  const errName = (errObj && errObj.name) || (err && err.name) || 'Error';
+  const rawMsg = (errObj && errObj.message) || (err && (err.message || err.error_description)) || (typeof err === 'string' ? err : 'Upload failed');
+  const errMsg = String(rawMsg).slice(0, 120);
+  console.error(`[voice] upload failed: ${errName}: ${errMsg}`);
+};
+
 /**
  * Upload voice file to Supabase.
  * Returns { success: true, voicePath } on success,
@@ -118,9 +174,22 @@ const saveVoice = async (voiceFile, sessionId, branchSlug) => {
   try {
     const slug = branchSlug || 'default';
     const remotePath = `${slug}/${sessionId}/voice.m4a`;
-    await storage.uploadFile(VOICE_BUCKET, remotePath, voiceFile.buffer, voiceFile.mimetype || 'audio/mp4');
+    const contentType = resolveVoiceContentType(voiceFile);
+
+    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+      logVoiceUploadError(new Error('Supabase not configured'));
+      return { success: false };
+    }
+
+    const uploadRes = await storage.uploadFile(VOICE_BUCKET, remotePath, voiceFile.buffer, contentType);
+    if (!uploadRes || uploadRes instanceof Error || uploadRes.error || uploadRes.success === false) {
+      logVoiceUploadError(uploadRes);
+      return { success: false };
+    }
+
     return { success: true, voicePath: remotePath };
-  } catch (_err) {
+  } catch (err) {
+    logVoiceUploadError(err);
     return { success: false };
   }
 };
@@ -349,6 +418,7 @@ exports.finishSession = async (req, res) => {
     // Voice file (optional)
     const voiceFile = req.files && req.files.voice && req.files.voice[0];
     const hasVoice = Boolean(voiceFile);
+    console.log(`[voice] file received: ${hasVoice ? 'yes' : 'no'}, ${hasVoice ? (voiceFile.size || 0) : 0} bytes, ${hasVoice ? (voiceFile.mimetype || 'none') : 'none'}`);
 
     // ── customerMet block ─────────────────────────────────────────────────────
     const cmBlock = parseCustomerMetBlock(req.body, hasVoice);
@@ -378,6 +448,15 @@ exports.finishSession = async (req, res) => {
 
     const endLocation = parseJson(req.body.endLocation, null);
     const slug = branchSlug(req);
+
+    // Voice upload BEFORE anything is persisted (Evidence, NLP, session fields, stats)
+    let voiceResult = null;
+    if (hasVoice) {
+      voiceResult = await saveVoice(voiceFile, sessionId, slug);
+      if (!voiceResult || !voiceResult.success) {
+        return res.status(503).json({ success: false, message: 'Voice note could not be saved. Please try again.' });
+      }
+    }
 
     let evidence = null;
     if (endPhotoFile) {
@@ -431,16 +510,6 @@ exports.finishSession = async (req, res) => {
       session.endAddress = String(req.body.endAddress).trim().slice(0, 300);
     }
 
-    // Voice upload (never fails the save unless voice required and upload fails)
-    const voiceResult = await saveVoice(voiceFile, sessionId, slug);
-    if (hasVoice && voiceResult && !voiceResult.success) {
-      // Upload failed — only block if there is no notMetReason to fall back on
-      const notMetReason = cmBlock.ok === true ? (cmBlock.notMetReason || '') : String(req.body.notMetReason || '').trim();
-      if (!notMetReason) {
-        return res.status(503).json({ success: false, retryable: true, message: 'Voice upload failed. Please retry.' });
-      }
-      // notMetReason exists: finish normally, skip voice
-    }
     if (voiceResult && voiceResult.voicePath) {
       session.voicePath = voiceResult.voicePath;
       if (req.body.voiceDurationSeconds !== undefined) {
@@ -480,6 +549,11 @@ exports.finishSessionWalk = async (req, res) => {
     const agentId = (req.agent && req.agent._id) || (req.staff && req.staff._id);
     const staffId = agentId.toString();
 
+    // Voice file (optional)
+    const voiceFile = req.files && req.files.voice && req.files.voice[0];
+    const hasVoice = Boolean(voiceFile);
+    console.log(`[voice] file received: ${hasVoice ? 'yes' : 'no'}, ${hasVoice ? (voiceFile.size || 0) : 0} bytes, ${hasVoice ? (voiceFile.mimetype || 'none') : 'none'}`);
+
     const session = await RecoverySession.findOne({
       sessionId,
       $or: [{ agentId }, { staffId }]
@@ -494,10 +568,6 @@ exports.finishSessionWalk = async (req, res) => {
       return fail(res, 400, 'Ending speedometer photo is required for Bike/Car recovery. Use the finish endpoint with photo.');
     }
 
-    // Voice file (optional)
-    const voiceFile = req.files && req.files.voice && req.files.voice[0];
-    const hasVoice = Boolean(voiceFile);
-
     // ── customerMet block ─────────────────────────────────────────────────────
     const cmBlock = parseCustomerMetBlock(req.body, hasVoice);
     if (cmBlock.ok === false) return fail(res, cmBlock.status, cmBlock.message);
@@ -507,6 +577,15 @@ exports.finishSessionWalk = async (req, res) => {
 
     const endLocation = parseJson(req.body.endLocation, null);
     const slug = branchSlug(req);
+
+    // Voice upload BEFORE anything is persisted (NLP, session fields, stats)
+    let voiceResult = null;
+    if (hasVoice) {
+      voiceResult = await saveVoice(voiceFile, sessionId, slug);
+      if (!voiceResult || !voiceResult.success) {
+        return res.status(503).json({ success: false, message: 'Voice note could not be saved. Please try again.' });
+      }
+    }
 
     const endTime = new Date();
     session.endTime = endTime;
@@ -554,14 +633,6 @@ exports.finishSessionWalk = async (req, res) => {
       session.endAddress = String(req.body.endAddress).trim().slice(0, 300);
     }
 
-    // Voice upload
-    const voiceResult = await saveVoice(voiceFile, sessionId, slug);
-    if (hasVoice && voiceResult && !voiceResult.success) {
-      const notMetReason = cmBlock.ok === true ? (cmBlock.notMetReason || '') : String(req.body.notMetReason || '').trim();
-      if (!notMetReason) {
-        return res.status(503).json({ success: false, retryable: true, message: 'Voice upload failed. Please retry.' });
-      }
-    }
     if (voiceResult && voiceResult.voicePath) {
       session.voicePath = voiceResult.voicePath;
       if (req.body.voiceDurationSeconds !== undefined) {
@@ -639,6 +710,7 @@ exports.syncOfflineSession = async (req, res) => {
     // ── CASE 1: Session already exists in DB ──────────────────────────────────
     const existing = await RecoverySession.findOne({ deviceSessionId });
     if (existing) {
+      console.log(`[voice] file received: ${hasVoice ? 'yes' : 'no'}, ${hasVoice ? (voiceFile.size || 0) : 0} bytes, ${hasVoice ? (voiceFile.mimetype || 'none') : 'none'}`);
       if (existing.status === 'COMPLETED') {
         return res.status(200).json({ success: true, alreadySynced: true, session: existing });
       }
@@ -648,6 +720,22 @@ exports.syncOfflineSession = async (req, res) => {
 
       if (needsPhoto && !endPhotoFile && !existing.endSpeedometerEvidenceId) {
         return fail(res, 400, 'Ending speedometer photo is required to finish BIKE/CAR recovery.');
+      }
+
+      // ── customerMet block ─────────────────────────────────────────────────
+      const cmBlock1 = parseCustomerMetBlock(body, hasVoice);
+      if (cmBlock1.ok === false) return fail(res, cmBlock1.status, cmBlock1.message);
+
+      const remarks = String(body.remarks || body.rawRemarks || existing.remarks || '').trim();
+      if (cmBlock1.ok === null && !remarks) return fail(res, 400, 'Customer visit remarks are required.');
+
+      // Voice upload BEFORE anything is persisted (Evidence, NLP, session fields, stats)
+      let voiceResult1 = null;
+      if (hasVoice) {
+        voiceResult1 = await saveVoice(voiceFile, existing.sessionId, slug);
+        if (!voiceResult1 || !voiceResult1.success) {
+          return res.status(503).json({ success: false, message: 'Voice note could not be saved. Please try again.' });
+        }
       }
 
       const endLoc = parseJson(body.endLocation, null);
@@ -664,13 +752,6 @@ exports.syncOfflineSession = async (req, res) => {
         });
         existing.endSpeedometerEvidenceId = endEv.evidenceId;
       }
-
-      // ── customerMet block ─────────────────────────────────────────────────
-      const cmBlock1 = parseCustomerMetBlock(body, hasVoice);
-      if (cmBlock1.ok === false) return fail(res, cmBlock1.status, cmBlock1.message);
-
-      const remarks = String(body.remarks || body.rawRemarks || existing.remarks || '').trim();
-      if (cmBlock1.ok === null && !remarks) return fail(res, 400, 'Customer visit remarks are required.');
 
       existing.endTime = body.endTime ? new Date(body.endTime) : new Date();
       existing.status = 'COMPLETED';
@@ -714,14 +795,6 @@ exports.syncOfflineSession = async (req, res) => {
         existing.endAddress = String(body.endAddress).trim().slice(0, 300);
       }
 
-      // Voice upload
-      const voiceResult1 = await saveVoice(voiceFile, existing.sessionId, slug);
-      if (hasVoice && voiceResult1 && !voiceResult1.success) {
-        const notMetReason1 = cmBlock1.ok === true ? (cmBlock1.notMetReason || '') : String(body.notMetReason || '').trim();
-        if (!notMetReason1) {
-          return res.status(503).json({ success: false, retryable: true, message: 'Voice upload failed. Please retry.' });
-        }
-      }
       if (voiceResult1 && voiceResult1.voicePath) {
         existing.voicePath = voiceResult1.voicePath;
         if (body.voiceDurationSeconds !== undefined) {
@@ -760,6 +833,8 @@ exports.syncOfflineSession = async (req, res) => {
     }
 
     // ── CASE 2: Entirely offline session creation ───────────────────────────
+    console.log(`[voice] file received: ${hasVoice ? 'yes' : 'no'}, ${hasVoice ? (voiceFile.size || 0) : 0} bytes, ${hasVoice ? (voiceFile.mimetype || 'none') : 'none'}`);
+
     const vehicleTypeRaw = String(body.vehicleType || body.transportMode || 'WALK').toUpperCase().trim();
     const isWalkLike = vehicleTypeRaw === 'WALK' || vehicleTypeRaw === 'OTHER';
     const needsPhotos = vehicleTypeRaw === 'BIKE' || vehicleTypeRaw === 'CAR';
@@ -795,6 +870,15 @@ exports.syncOfflineSession = async (req, res) => {
 
     const startLoc = parseJson(body.startLocation, null);
     const endLoc = parseJson(body.endLocation, null);
+
+    // Voice upload BEFORE anything is persisted (Evidence, NLP, session creation, stats)
+    let voiceResult2 = null;
+    if (hasVoice) {
+      voiceResult2 = await saveVoice(voiceFile, sessionId, slug);
+      if (!voiceResult2 || !voiceResult2.success) {
+        return res.status(503).json({ success: false, message: 'Voice note could not be saved. Please try again.' });
+      }
+    }
 
     let startEvidence = null;
     let endEvidence = null;
@@ -868,14 +952,6 @@ exports.syncOfflineSession = async (req, res) => {
       };
     }
 
-    // Voice upload before create
-    const voiceResult2 = await saveVoice(voiceFile, sessionId, slug);
-    if (hasVoice && voiceResult2 && !voiceResult2.success) {
-      const notMetReason2 = cmBlock2.ok === true ? (cmBlock2.notMetReason || '') : String(body.notMetReason || '').trim();
-      if (!notMetReason2) {
-        return res.status(503).json({ success: false, retryable: true, message: 'Voice upload failed. Please retry.' });
-      }
-    }
     if (voiceResult2 && voiceResult2.voicePath) {
       createPayload.voicePath = voiceResult2.voicePath;
       if (body.voiceDurationSeconds !== undefined) {
