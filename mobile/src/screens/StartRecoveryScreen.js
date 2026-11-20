@@ -71,6 +71,7 @@ export default function StartRecoveryScreen({ route, navigation }) {
   const [checkingPhoto, setCheckingPhoto] = useState(false);
   const [speedometerFailedTries, setSpeedometerFailedTries] = useState(0);
   const [speedometerCheckError, setSpeedometerCheckError] = useState('');
+  const [speedometerSkippedReason, setSpeedometerSkippedReason] = useState(null);
   const [lastSpeedometerPhoto, setLastSpeedometerPhoto] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -208,8 +209,10 @@ export default function StartRecoveryScreen({ route, navigation }) {
           setSpeedometerCheckError('');
           setSpeedometerFailedTries(0);
           setLastSpeedometerPhoto(null);
+          setSpeedometerSkippedReason(checkRes.skipped ? (checkRes.reason || 'error') : null);
         } else {
           setPhoto(null);
+          setSpeedometerSkippedReason(null);
           const nextTries = speedometerFailedTries + 1;
           setSpeedometerFailedTries(nextTries);
           setLastSpeedometerPhoto(capturedUri);
@@ -222,6 +225,11 @@ export default function StartRecoveryScreen({ route, navigation }) {
         setSpeedometerCheckError('');
         setSpeedometerFailedTries(0);
         setLastSpeedometerPhoto(null);
+        let reason = 'error';
+        if (err && typeof err.name === 'string' && err.name && err.name !== 'Error' && /^[A-Za-z0-9_]+$/.test(err.name)) {
+          reason = err.name;
+        }
+        setSpeedometerSkippedReason(reason);
       } finally {
         setCheckingPhoto(false);
       }
@@ -235,6 +243,7 @@ export default function StartRecoveryScreen({ route, navigation }) {
       setSpeedometerCheckError('');
       setSpeedometerFailedTries(0);
       setLastSpeedometerPhoto(null);
+      setSpeedometerSkippedReason(null);
     }
   };
 
@@ -516,6 +525,7 @@ export default function StartRecoveryScreen({ route, navigation }) {
                   if (!mode.requiresVehicle) {
                     setVehicleNumber('');
                     setPhoto(null);
+                    setSpeedometerSkippedReason(null);
                   }
                 }}
                 activeOpacity={0.85}
@@ -652,6 +662,11 @@ export default function StartRecoveryScreen({ route, navigation }) {
             ) : photo ? (
               <View style={styles.previewBox}>
                 <Image source={{ uri: photo }} style={styles.previewImage} resizeMode="cover" />
+                {speedometerSkippedReason ? (
+                  <Text style={styles.speedometerSkippedText}>
+                    Number check could not run ({speedometerSkippedReason}). Photo accepted.
+                  </Text>
+                ) : null}
                 <TouchableOpacity style={styles.retakeBtn} onPress={takeSpeedometer}>
                   <Ionicons name="camera-reverse-outline" size={16} color="#2563EB" style={{ marginRight: 6 }} />
                   <Text style={styles.retakeBtnText}>Retake Photo</Text>
@@ -798,6 +813,12 @@ const styles = StyleSheet.create({
     alignItems: 'center', borderWidth: 1, borderColor: '#E2E8F0', marginBottom: 16,
   },
   previewImage: { width: '100%', height: 190, borderRadius: 10 },
+  speedometerSkippedText: {
+    color: '#64748B',
+    fontSize: 12,
+    marginTop: 8,
+    textAlign: 'center',
+  },
   retakeBtn: {
     flexDirection: 'row', alignItems: 'center',
     marginTop: 12, paddingVertical: 7, paddingHorizontal: 14,
