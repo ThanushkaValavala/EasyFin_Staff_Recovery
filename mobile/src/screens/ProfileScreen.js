@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  ActivityIndicator, RefreshControl, Alert,
+  ActivityIndicator, RefreshControl, Alert, Modal, Image, Platform,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
 import * as Location from 'expo-location';
 import { apiGet } from '../api';
+import { API_URL } from '../config';
 import { BADGE_COLORS } from '../utils/nlpSummarizer';
 import { cacheHistory, getCachedHistory, getPendingSessions, syncPendingSessions } from '../utils/offlineStore';
 
@@ -99,7 +100,154 @@ function InfoRow({ icon, label, value, wrapValue }) {
   );
 }
 
+const evidenceSourceCache = new Map();
+const evidenceInFlightCache = new Map();
+
+async function resolveEvidenceSource(evidenceId) {
+  if (!evidenceId) return null;
+  if (evidenceSourceCache.has(evidenceId)) {
+    return evidenceSourceCache.get(evidenceId);
+  }
+  if (evidenceInFlightCache.has(evidenceId)) {
+    return evidenceInFlightCache.get(evidenceId);
+  }
+
+  const promise = (async () => {
+    // 1. Ask for secured link
+    try {
+      const res = await apiGet(`/recovery/evidence/${evidenceId}/url`);
+      if (res && res.url) {
+        const src = { uri: res.url };
+        evidenceSourceCache.set(evidenceId, src);
+        return src;
+      }
+    } catch (_e) {
+      // Direct image fallback for MongoDB-stored evidence or network/url failure
+    }
+
+    // 2. Load /recovery/evidence/:id/image with Authorization header
+    try {
+      const token = await SecureStore.getItemAsync('token');
+      const src = {
+        uri: `${API_URL}/recovery/evidence/${evidenceId}/image`,
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      };
+      evidenceSourceCache.set(evidenceId, src);
+      return src;
+    } catch (_err) {
+      return null;
+    } finally {
+      evidenceInFlightCache.delete(evidenceId);
+    }
+  })();
+
+  evidenceInFlightCache.set(evidenceId, promise);
+  return promise;
+}
+
+function SpeedometerThumbnail({ label, evidenceId, localUri, onOpen }) {
+  const [source, setSource] = useState(() => {
+    if (localUri) return { uri: localUri };
+    if (evidenceId && evidenceSourceCache.has(evidenceId)) {
+      return evidenceSourceCache.get(evidenceId);
+    }
+    return null;
+  });
+  const [loading, setLoading] = useState(() => {
+    if (localUri) return false;
+    if (evidenceId && evidenceSourceCache.has(evidenceId)) return false;
+    return !!evidenceId;
+  });
+  const [loadError, setLoadError] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    if (localUri) {
+      setSource({ uri: localUri });
+      setLoading(false);
+      setLoadError(false);
+      return;
+    }
+    if (!evidenceId) {
+      setLoading(false);
+      return;
+    }
+    if (evidenceSourceCache.has(evidenceId)) {
+      setSource(evidenceSourceCache.get(evidenceId));
+      setLoading(false);
+      setLoadError(false);
+      return;
+    }
+
+    setLoading(true);
+    setLoadError(false);
+    resolveEvidenceSource(evidenceId)
+      .then((src) => {
+        if (!active) return;
+        if (src) {
+          setSource(src);
+        } else {
+          setLoadError(true);
+        }
+        setLoading(false);
+      })
+      .catch(() => {
+        if (!active) return;
+        setLoadError(true);
+        setLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [evidenceId, localUri]);
+
+  return (
+    <View style={styles.thumbnailContainer}>
+      <TouchableOpacity
+        style={styles.thumbnailWrapper}
+        onPress={() => {
+          if (source && !loadError && !loading) {
+            onOpen(source);
+          }
+        }}
+        disabled={loading || loadError || !source}
+        activeOpacity={0.8}
+      >
+        {loading ? (
+          <View style={styles.thumbnailPlaceholder}>
+            <ActivityIndicator size="small" color="#94A3B8" />
+          </View>
+        ) : loadError || !source ? (
+          <View style={styles.thumbnailPlaceholder}>
+            <Ionicons name="videocam-off-outline" size={22} color="#94A3B8" />
+          </View>
+        ) : (
+          <Image
+            source={source}
+            style={styles.thumbnailImage}
+            resizeMode="cover"
+            onError={() => setLoadError(true)}
+          />
+        )}
+      </TouchableOpacity>
+      <Text style={styles.thumbnailCaption}>{label}</Text>
+    </View>
+  );
+}
+
 function SessionCard({ session }) {
+  const [modalImage, setModalImage] = useState(null);
+
+  const startEvidenceId = session.startSpeedometerEvidenceId;
+  const startLocalUri = session.startPhotoUri;
+  const endEvidenceId = session.endSpeedometerEvidenceId;
+  const endLocalUri = session.endPhotoUri;
+
+  const hasStart = !!(startEvidenceId || startLocalUri);
+  const hasEnd = !!(endEvidenceId || endLocalUri);
+  const hasAnyPhoto = hasStart || hasEnd;
+
   const vehicleLabel = session.vehicleType
     ? session.vehicleType.charAt(0).toUpperCase() + session.vehicleType.slice(1).toLowerCase()
     : 'Walk';
@@ -284,6 +432,62 @@ function SessionCard({ session }) {
           <Text style={styles.playVoiceBtnText}>Play voice note</Text>
         </TouchableOpacity>
       ) : null}
+
+      {/* Speedometer thumbnails */}
+      {hasAnyPhoto ? (
+        <View style={styles.speedometerSection}>
+          <Text style={styles.speedometerSectionLabel}>Speedometer</Text>
+          <View style={styles.speedometerThumbnailsRow}>
+            {hasStart ? (
+              <SpeedometerThumbnail
+                label="Start"
+                evidenceId={startEvidenceId}
+                localUri={startLocalUri}
+                onOpen={(src) => setModalImage({ source: src, title: 'Start Speedometer' })}
+              />
+            ) : null}
+            {hasEnd ? (
+              <SpeedometerThumbnail
+                label="End"
+                evidenceId={endEvidenceId}
+                localUri={endLocalUri}
+                onOpen={(src) => setModalImage({ source: src, title: 'End Speedometer' })}
+              />
+            ) : null}
+          </View>
+        </View>
+      ) : null}
+
+      {/* Full-size photo Modal */}
+      <Modal
+        visible={!!modalImage}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setModalImage(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>{modalImage?.title || 'Speedometer'}</Text>
+            <TouchableOpacity
+              style={styles.modalCloseBtn}
+              onPress={() => setModalImage(null)}
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="close" size={24} color="#FFFFFF" />
+            </TouchableOpacity>
+          </View>
+          <View style={styles.modalImageContainer}>
+            {modalImage ? (
+              <Image
+                source={modalImage.source}
+                style={styles.modalFullImage}
+                resizeMode="contain"
+              />
+            ) : null}
+          </View>
+        </View>
+      </Modal>
 
       <View style={styles.sessionInfoGrid}>
         <InfoRow icon="time-outline" label="Start Time" value={fmtTime(session.startTime)} />
@@ -673,4 +877,87 @@ const styles = StyleSheet.create({
   },
   customerNotMetTitle: { fontSize: 13, fontWeight: '800', color: '#DC2626', marginBottom: 4 },
   customerNotMetDetail: { fontSize: 12, fontWeight: '500', color: '#991B1B', marginTop: 2 },
+
+  // Speedometer row & modal in SessionCard
+  speedometerSection: {
+    marginTop: 6,
+    marginBottom: 10,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+  },
+  speedometerSectionLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#64748B',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 8,
+  },
+  speedometerThumbnailsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+  },
+  thumbnailContainer: {
+    alignItems: 'center',
+  },
+  thumbnailWrapper: {
+    width: 64,
+    height: 64,
+    borderRadius: 10,
+    overflow: 'hidden',
+    backgroundColor: '#E2E8F0',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+  },
+  thumbnailImage: {
+    width: '100%',
+    height: '100%',
+  },
+  thumbnailPlaceholder: {
+    width: 64,
+    height: 64,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  thumbnailCaption: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#475569',
+    marginTop: 4,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.94)',
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingTop: Platform.OS === 'ios' ? 56 : 24,
+    paddingBottom: 12,
+  },
+  modalTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+  modalCloseBtn: {
+    padding: 6,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.18)',
+  },
+  modalImageContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 16,
+  },
+  modalFullImage: {
+    width: '100%',
+    height: '100%',
+  },
 });
