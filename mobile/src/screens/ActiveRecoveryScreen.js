@@ -6,7 +6,7 @@ import * as TaskManager from 'expo-task-manager';
 import { useKeepAwake } from 'expo-keep-awake';
 import { Ionicons } from '@expo/vector-icons';
 import { apiPost } from '../api';
-import { distanceMeters, formatDistance, formatDuration, getProfile } from '../utils/geo';
+import { distanceMeters, formatDistance, formatDuration, getProfile, getAccurateLocation } from '../utils/geo';
 
 const LOCATION_TASK_NAME = 'EASYFIN_BACKGROUND_LOCATION_TASK';
 
@@ -431,27 +431,52 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
       console.warn('[Location] Failed to stop background updates:', e);
     }
 
-    let end = pathRef.current[pathRef.current.length - 1];
+    const lastTracked = pathRef.current[pathRef.current.length - 1];
+    let end = lastTracked;
+    const lastTrackedAcc = (lastTracked && typeof lastTracked.accuracy === 'number')
+      ? lastTracked.accuracy
+      : Infinity;
+
     try {
-      const cur = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.BestForNavigation });
-      const curAcc = cur.coords.accuracy != null ? cur.coords.accuracy : 10;
-      if (cur.coords.accuracy != null) {
-        setLatestAccuracy(cur.coords.accuracy);
+      // Take a fresh BestForNavigation fix and wait up to 10 s for accuracy <= 20 m
+      const fresh = await getAccurateLocation({ timeoutMs: 10000, targetAccuracy: 20 });
+      if (fresh && fresh.coords && typeof fresh.coords.accuracy === 'number') {
+        if (typeof setLatestAccuracy === 'function') {
+          setLatestAccuracy(fresh.coords.accuracy);
+        }
+        // Use it as the end point only if its accuracy is better than that of the last tracked point
+        if (fresh.coords.accuracy < lastTrackedAcc) {
+          end = {
+            latitude: fresh.coords.latitude,
+            longitude: fresh.coords.longitude,
+            accuracy: fresh.coords.accuracy,
+            endLatitude: fresh.coords.latitude,
+            endLongitude: fresh.coords.longitude,
+            endAccuracy: fresh.coords.accuracy,
+            timestamp: fresh.timestamp ? new Date(fresh.timestamp).toISOString() : new Date().toISOString(),
+          };
+        }
       }
-      // Add the final fix only if its accuracy <= profile.maxAcc
-      if (curAcc <= profile.maxAcc) {
-        const rawSpeed = (cur.coords.speed != null && cur.coords.speed >= 0) ? cur.coords.speed : null;
-        const p = {
-          latitude: cur.coords.latitude,
-          longitude: cur.coords.longitude,
-          accuracy: curAcc,
-          speed: rawSpeed,
-          timestamp: cur.timestamp ? new Date(cur.timestamp).toISOString() : new Date().toISOString(),
-        };
-        addPoint(p);
-      }
-      end = pathRef.current[pathRef.current.length - 1] || end;
-    } catch (e) {}
+    } catch (e) {
+      // Timeout or error — keep lastTracked
+    }
+
+    if (end) {
+      end = {
+        ...end,
+        endLatitude: end.latitude,
+        endLongitude: end.longitude,
+        endAccuracy: end.accuracy || 0,
+      };
+    }
+
+    const rawStart = pathRef.current[0] || session?.startLocation || null;
+    const startPoint = rawStart ? {
+      ...rawStart,
+      startLatitude: rawStart.latitude,
+      startLongitude: rawStart.longitude,
+      startAccuracy: rawStart.accuracy || 0,
+    } : null;
 
     await flush();
     allowLeave.current = true;
@@ -460,6 +485,10 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
       session: {
         ...(session || {}),
         startTime: localStartIsoRef.current,
+        startLocation: startPoint,
+        startLatitude: startPoint?.latitude,
+        startLongitude: startPoint?.longitude,
+        startAccuracy: startPoint?.accuracy,
       },
       startTime: localStartIsoRef.current,
       distanceMeters: metersRef.current,
@@ -467,8 +496,14 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
       movingSeconds: Math.round(movingSecondsRef.current),
       idleSeconds: Math.round(idleSecondsRef.current),
       unknownSeconds: Math.round(unknownSecondsRef.current),
-      startLocation: pathRef.current[0] || session?.startLocation || null,
-      endLocation: end || pathRef.current[0] || null,
+      startLocation: startPoint,
+      endLocation: end || startPoint || null,
+      startLatitude: startPoint?.latitude,
+      startLongitude: startPoint?.longitude,
+      startAccuracy: startPoint?.accuracy,
+      endLatitude: end?.latitude,
+      endLongitude: end?.longitude,
+      endAccuracy: end?.accuracy,
       transportMode: transportMode || session?.vehicleType || 'WALK',
       vehicleNumber: vehicleNumber || session?.vehicleNumber || '',
       startPhotoUri: route.params?.startPhotoUri || session?.startPhotoUri || null,

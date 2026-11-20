@@ -6,7 +6,7 @@ const evidenceSchema = new mongoose.Schema(
     sessionId: { type: String, required: true, index: true },
     agentId: { type: mongoose.Schema.Types.Mixed, ref: 'Staff', index: true },
     staffId: { type: mongoose.Schema.Types.Mixed, ref: 'Staff', required: true, index: true },
-    kind: { type: String, enum: ['EVIDENCE', 'START_SPEEDOMETER', 'END_SPEEDOMETER'], default: 'EVIDENCE', index: true },
+    kind: { type: String, enum: ['EVIDENCE', 'START_SPEEDOMETER', 'END_SPEEDOMETER', 'ROUTE'], default: 'EVIDENCE', index: true },
     fileName: { type: String, required: true },
     originalName: { type: String, default: 'photo.jpg' },
     filePath: { type: String, default: '' },

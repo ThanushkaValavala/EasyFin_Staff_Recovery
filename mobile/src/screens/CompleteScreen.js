@@ -6,6 +6,7 @@ import {
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
+import MapView, { Polyline, Marker } from 'react-native-maps';
 import { Ionicons } from '@expo/vector-icons';
 import { useAudioRecorder, AudioModule, RecordingPresets } from 'expo-audio';
 import { apiUploadFile, apiPost, apiUploadFiles, apiGet } from '../api';
@@ -28,17 +29,19 @@ function isNetworkError(e) {
 }
 
 async function describe(p) {
-  if (!p || typeof p.latitude !== 'number' || typeof p.longitude !== 'number') return 'Location recorded';
-  const coords = `${p.latitude.toFixed(4)}, ${p.longitude.toFixed(4)}`;
+  if (!p || typeof p.latitude !== 'number' || typeof p.longitude !== 'number') return '';
   try {
     const r = await Location.reverseGeocodeAsync({ latitude: p.latitude, longitude: p.longitude });
     if (r && r[0]) {
       const a = r[0];
-      const line = [a.name, a.street, a.city].filter(Boolean).join(', ');
-      if (line) return `${line} (${coords})`;
+      const cityOrSub = a.subregion || a.city || '';
+      const parts = [a.name, a.street, cityOrSub, a.region, a.postalCode].filter(Boolean);
+      const uniqueParts = parts.filter((part, idx) => parts.indexOf(part) === idx);
+      const text = uniqueParts.join(', ');
+      if (text) return text;
     }
   } catch (e) {}
-  return coords;
+  return `${p.latitude}, ${p.longitude}`;
 }
 
 async function getReadableAddress(p) {
@@ -329,6 +332,39 @@ export default function CompleteScreen({ route, navigation }) {
   const endAddressRef = useRef('');
   const done = useRef(false);
   const scrollViewRef = useRef(null);
+  const mapRef = useRef(null);
+
+  const takeRouteSnapshot = async () => {
+    try {
+      if (!mapRef.current) return null;
+      const pts = Array.isArray(allPoints)
+        ? allPoints.filter((p) => p && typeof p.latitude === 'number' && typeof p.longitude === 'number')
+        : [];
+      if (pts.length === 0) return null;
+
+      const coords = pts.map((p) => ({ latitude: p.latitude, longitude: p.longitude }));
+      if (mapRef.current.fitToCoordinates && coords.length > 0) {
+        mapRef.current.fitToCoordinates(coords, {
+          edgePadding: { top: 40, right: 40, bottom: 40, left: 40 },
+          animated: false,
+        });
+        await new Promise((r) => setTimeout(r, 400));
+      }
+
+      if (mapRef.current.takeSnapshot) {
+        const uri = await mapRef.current.takeSnapshot({
+          width: 800,
+          format: 'jpg',
+          quality: 0.85,
+          result: 'file',
+        });
+        return uri;
+      }
+    } catch (e) {
+      console.warn('[CompleteScreen] takeRouteSnapshot error:', e.message);
+    }
+    return null;
+  };
 
   // ── Customer met / not met ─────────────────────────────────────────────────
   const [customerMet, setCustomerMet] = useState(null); // null | true | false
@@ -462,6 +498,28 @@ export default function CompleteScreen({ route, navigation }) {
     setSubmitting(true);
     const end = endLocation || {};
 
+    // ── Route Map Snapshot ──────────────────────────────────────────────────
+    let routeSnapshotUri = null;
+    try {
+      routeSnapshotUri = await takeRouteSnapshot();
+    } catch (snapErr) {
+      console.warn('[CompleteScreen] Snapshot generation error:', snapErr.message);
+      routeSnapshotUri = null;
+    }
+
+    if (routeSnapshotUri) {
+      try {
+        await apiUploadFile(
+          `/recovery/sessions/${sessionId}/evidence`,
+          { kind: 'ROUTE' },
+          'photo',
+          routeSnapshotUri
+        );
+      } catch (uploadErr) {
+        console.warn('[CompleteScreen] Route snapshot upload error (will continue):', uploadErr.message);
+      }
+    }
+
     let sAddr = startAddressRef.current;
     if (!sAddr && startLocation) {
       try {
@@ -478,6 +536,31 @@ export default function CompleteScreen({ route, navigation }) {
     }
     sAddr = sAddr || '';
     eAddr = eAddr || '';
+
+    const startLat = startLocation?.latitude ?? null;
+    const startLng = startLocation?.longitude ?? null;
+    const startAcc = startLocation?.accuracy ?? null;
+    const endLat = endLocation?.latitude ?? end?.latitude ?? null;
+    const endLng = endLocation?.longitude ?? end?.longitude ?? null;
+    const endAcc = endLocation?.accuracy ?? end?.accuracy ?? null;
+
+    const startLocPayload = startLocation ? {
+      latitude: startLat,
+      longitude: startLng,
+      accuracy: startAcc || 0,
+      startLatitude: startLat,
+      startLongitude: startLng,
+      startAccuracy: startAcc || 0,
+    } : null;
+
+    const endLocPayload = {
+      latitude: endLat || 0,
+      longitude: endLng || 0,
+      accuracy: endAcc || 0,
+      endLatitude: endLat,
+      endLongitude: endLng,
+      endAccuracy: endAcc || 0,
+    };
 
     const customerNames = customerMet ? visitedNames.filter((n) => n.trim()).map((n) => n.trim()) : [];
     const activeVoiceUri = customerMet ? voiceUri : notMetVoiceUri;
@@ -510,11 +593,14 @@ export default function CompleteScreen({ route, navigation }) {
           unknownSeconds: unknownSeconds != null ? Math.round(unknownSeconds) : null,
           startAddress: sAddr,
           endAddress: eAddr,
-          endLocation: {
-            latitude: end.latitude || 0,
-            longitude: end.longitude || 0,
-            accuracy: end.accuracy || 0,
-          },
+          startLocation: startLocPayload,
+          endLocation: endLocPayload,
+          startLatitude: startLat,
+          startLongitude: startLng,
+          startAccuracy: startAcc,
+          endLatitude: endLat,
+          endLongitude: endLng,
+          endAccuracy: endAcc,
           nlpDetails: nlpDetailsStr,
         });
       } else {
@@ -532,11 +618,14 @@ export default function CompleteScreen({ route, navigation }) {
           unknownSeconds: unknownSeconds != null ? String(Math.round(unknownSeconds)) : '',
           startAddress: sAddr,
           endAddress: eAddr,
-          endLocation: JSON.stringify({
-            latitude: end.latitude || 0,
-            longitude: end.longitude || 0,
-            accuracy: end.accuracy || 0,
-          }),
+          startLocation: startLocPayload ? JSON.stringify(startLocPayload) : '',
+          endLocation: JSON.stringify(endLocPayload),
+          startLatitude: startLat != null ? String(startLat) : '',
+          startLongitude: startLng != null ? String(startLng) : '',
+          startAccuracy: startAcc != null ? String(startAcc) : '',
+          endLatitude: endLat != null ? String(endLat) : '',
+          endLongitude: endLng != null ? String(endLng) : '',
+          endAccuracy: endAcc != null ? String(endAcc) : '',
           nlpDetails: nlpDetailsStr,
           voiceDurationSeconds: activeVoiceUri ? String(activeVoiceDuration) : '',
         };
@@ -596,10 +685,17 @@ export default function CompleteScreen({ route, navigation }) {
             nlpSummary,
             nlpCategory,
             nlpDetails: nlpDetailsStr,
-            startLocation: startLocation || session?.startLocation || null,
-            endLocation: end || null,
+            startLocation: startLocPayload || session?.startLocation || null,
+            endLocation: endLocPayload || null,
+            startLatitude: startLat,
+            startLongitude: startLng,
+            startAccuracy: startAcc,
+            endLatitude: endLat,
+            endLongitude: endLng,
+            endAccuracy: endAcc,
             startPhotoUri: startPhotoUri || session?.startPhotoUri || null,
             endPhotoUri: needsEndPhoto ? (photo || null) : null,
+            routePhotoUri: routeSnapshotUri || null,
             voiceUri: activeVoiceUri || null,
             voiceDurationSeconds: activeVoiceUri ? activeVoiceDuration : null,
             customerMet,
@@ -874,12 +970,64 @@ export default function CompleteScreen({ route, navigation }) {
           </Text>
         ) : null}
       </View>
+
+      {/* Hidden MapView for Route Map Snapshot */}
+      <View style={styles.hiddenMapContainer} pointerEvents="none">
+        <MapView
+          ref={mapRef}
+          style={styles.hiddenMap}
+          initialRegion={{
+            latitude: Number(startLocation?.latitude || (allPoints && allPoints[0]?.latitude) || 0),
+            longitude: Number(startLocation?.longitude || (allPoints && allPoints[0]?.longitude) || 0),
+            latitudeDelta: 0.05,
+            longitudeDelta: 0.05,
+          }}
+        >
+          {Array.isArray(allPoints) && allPoints.length > 1 ? (
+            <Polyline
+              coordinates={allPoints.map((p) => ({ latitude: Number(p.latitude), longitude: Number(p.longitude) }))}
+              strokeColor="#2563EB"
+              strokeWidth={4}
+            />
+          ) : null}
+          {(startLocation || (allPoints && allPoints[0])) ? (
+            <Marker
+              coordinate={{
+                latitude: Number(startLocation?.latitude || allPoints[0].latitude),
+                longitude: Number(startLocation?.longitude || allPoints[0].longitude),
+              }}
+              pinColor="green"
+            />
+          ) : null}
+          {(endLocation || (allPoints && allPoints[allPoints.length - 1])) ? (
+            <Marker
+              coordinate={{
+                latitude: Number(endLocation?.latitude || allPoints[allPoints.length - 1].latitude),
+                longitude: Number(endLocation?.longitude || allPoints[allPoints.length - 1].longitude),
+              }}
+              pinColor="red"
+            />
+          ) : null}
+        </MapView>
+      </View>
     </ScrollView>
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
+  hiddenMapContainer: {
+    position: 'absolute',
+    top: -9999,
+    left: -9999,
+    width: 800,
+    height: 600,
+    opacity: 0,
+  },
+  hiddenMap: {
+    width: 800,
+    height: 600,
+  },
   keyboardAvoid: { flex: 1, backgroundColor: '#F8FAFC' },
   container: { flex: 1, backgroundColor: '#F8FAFC' },
   header: { marginBottom: 18 },

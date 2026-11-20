@@ -5,9 +5,45 @@ const { getIsConnected } = require('../config/db');
 const rules = require('../services/recoveryRules');
 const { summarize } = require('../services/nlpSummarizer');
 const storage = require('../services/storage');
+const evidenceController = require('./evidenceController');
 
 const PHOTO_BUCKET = process.env.SUPABASE_PHOTO_BUCKET || 'photos';
 const VOICE_BUCKET = process.env.SUPABASE_VOICE_BUCKET || 'voices';
+
+// Monkey-patch evidenceController.uploadEvidence to handle ROUTE evidence photos with Supabase storage
+const originalUploadEvidence = evidenceController.uploadEvidence;
+evidenceController.uploadEvidence = async (req, res) => {
+  const kind = (req.body && req.body.kind) || 'EVIDENCE';
+  if (kind === 'ROUTE' || req.body?.kind === 'ROUTE') {
+    try {
+      if (!req.models && !getIsConnected()) {
+        return res.status(503).json({ success: false, message: 'Database not connected.' });
+      }
+      const { sessionId } = req.params;
+      const agentId = (req.agent && req.agent._id) || (req.staff && req.staff._id);
+      const staffId = agentId ? agentId.toString() : (req.staff && req.staff._id ? req.staff._id.toString() : '');
+      if (!req.file) {
+        return res.status(400).json({ success: false, message: 'No photo file received.' });
+      }
+      const slug = branchSlug(req);
+      const evidence = await saveImage({
+        file: req.file,
+        sessionId,
+        branchSlug: slug,
+        staffId,
+        agentId,
+        kind: 'ROUTE',
+        location: parseJson(req.body.location, null),
+        models: req.models,
+      });
+      return res.status(201).json({ success: true, message: 'Route map snapshot saved.', evidence });
+    } catch (err) {
+      console.error('Route evidence upload error:', err.message);
+      return res.status(500).json({ success: false, message: 'Could not save route snapshot.' });
+    }
+  }
+  return originalUploadEvidence(req, res);
+};
 
 const fail = (res, code, message) => res.status(code).json({ success: false, message });
 
@@ -101,7 +137,7 @@ const saveImage = async ({ file, sessionId, branchSlug, staffId, agentId, kind, 
     storagePath,
     fileSize: file.size,
     mimeType: file.mimetype,
-    caption: kind === 'START_SPEEDOMETER' ? 'Starting speedometer' : 'Ending speedometer',
+    caption: kind === 'START_SPEEDOMETER' ? 'Starting speedometer' : (kind === 'ROUTE' ? 'Route map snapshot' : 'Ending speedometer'),
     latitude: Number(location && location.latitude) || 0,
     longitude: Number(location && location.longitude) || 0,
     data: fileData,
@@ -609,6 +645,36 @@ exports.getHistory = async (req, res) => {
       .select('-rawRemarks -remarks -visitNotes')
       .lean();
 
+    if (Evidence && sessions.length > 0) {
+      const sessionIds = sessions.map((s) => s.sessionId).filter(Boolean);
+      const evidences = await Evidence.find({ sessionId: { $in: sessionIds } })
+        .select('evidenceId sessionId kind storagePath capturedAt originalName caption')
+        .lean();
+
+      const evidenceMap = {};
+      for (const ev of evidences) {
+        if (!evidenceMap[ev.sessionId]) evidenceMap[ev.sessionId] = [];
+        evidenceMap[ev.sessionId].push(ev);
+      }
+
+      for (const session of sessions) {
+        const sEvs = evidenceMap[session.sessionId] || [];
+        session.evidence = sEvs;
+        const routeEv = sEvs.find((e) => e.kind === 'ROUTE');
+        if (routeEv) {
+          session.routeEvidenceId = routeEv.evidenceId;
+        }
+        if (!session.startSpeedometerEvidenceId) {
+          const startEv = sEvs.find((e) => e.kind === 'START_SPEEDOMETER');
+          if (startEv) session.startSpeedometerEvidenceId = startEv.evidenceId;
+        }
+        if (!session.endSpeedometerEvidenceId) {
+          const endEv = sEvs.find((e) => e.kind === 'END_SPEEDOMETER');
+          if (endEv) session.endSpeedometerEvidenceId = endEv.evidenceId;
+        }
+      }
+    }
+
     return res.status(200).json({ success: true, sessions });
   } catch (error) {
     console.error('getHistory error:', error.message);
@@ -1020,10 +1086,18 @@ exports.getEvidenceUrl = async (req, res) => {
 
     const isOwner = ev.staffId.toString() === staffId || ev.agentId?.toString() === staffId;
     if (!isOwner) return fail(res, 403, 'Not allowed to access this evidence.');
-    if (!ev.storagePath) return fail(res, 404, 'No cloud storage path for this evidence.');
+    if (!ev.storagePath) {
+      const fallbackUrl = ev.filePath || `/api/v1/recovery/evidence/${ev.evidenceId}/image`;
+      return res.status(200).json({ success: true, url: fallbackUrl, expiresIn: 300 });
+    }
 
-    const url = await storage.getSignedUrl(PHOTO_BUCKET, ev.storagePath, 300);
-    return res.status(200).json({ success: true, url, expiresIn: 300 });
+    try {
+      const url = await storage.getSignedUrl(PHOTO_BUCKET, ev.storagePath, 300);
+      return res.status(200).json({ success: true, url, expiresIn: 300 });
+    } catch (_storageErr) {
+      const fallbackUrl = ev.filePath || `/api/v1/recovery/evidence/${ev.evidenceId}/image`;
+      return res.status(200).json({ success: true, url: fallbackUrl, expiresIn: 300 });
+    }
   } catch (error) {
     console.error('getEvidenceUrl error:', error.message);
     return fail(res, 500, 'Could not generate evidence URL.');

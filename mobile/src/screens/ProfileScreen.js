@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, useMemo } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  ActivityIndicator, RefreshControl, Alert,
+  ActivityIndicator, RefreshControl, Alert, TextInput, Image,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
@@ -27,6 +27,81 @@ async function playVoiceNote(sessionId) {
 }
 
 const memoryAddressCache = new Map();
+const signedUrlCache = new Map();
+
+async function getPhotoUrl(evidenceId) {
+  if (!evidenceId) return null;
+  if (signedUrlCache.has(evidenceId)) return signedUrlCache.get(evidenceId);
+  try {
+    const res = await apiGet(`/recovery/evidence/${evidenceId}/url`);
+    const url = res?.url || res?.signedUrl;
+    if (url) {
+      signedUrlCache.set(evidenceId, url);
+      return url;
+    }
+  } catch (e) { }
+  return null;
+}
+
+const CHIPS = ['Today', 'Last 7 days', 'This month', 'All'];
+
+function toLocalDateKey(d) {
+  if (!d) return null;
+  const x = new Date(d);
+  if (isNaN(x.getTime())) return null;
+  const p = (n) => String(n).padStart(2, '0');
+  return `${x.getFullYear()}-${p(x.getMonth() + 1)}-${p(x.getDate())}`;
+}
+
+function keyToDisplay(key) {
+  if (!key) return '';
+  const [y, m, d] = key.split('-');
+  return `${d}-${m}-${y}`;
+}
+
+function parseUserDate(str) {
+  if (!str || str.length !== 10) return null;
+  const [dd, mm, yyyy] = str.split('-');
+  const d = parseInt(dd, 10);
+  const m = parseInt(mm, 10);
+  const y = parseInt(yyyy, 10);
+  if (isNaN(d) || isNaN(m) || isNaN(y) || m < 1 || m > 12 || d < 1 || d > 31 || y < 2000) return null;
+  const date = new Date(y, m - 1, d);
+  if (isNaN(date.getTime())) return null;
+  if (date.getFullYear() !== y || date.getMonth() !== m - 1 || date.getDate() !== d) return null;
+  return date;
+}
+
+function formatDDMMYYYY(date) {
+  if (!date || isNaN(date.getTime())) return '';
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(date.getDate())}-${p(date.getMonth() + 1)}-${date.getFullYear()}`;
+}
+
+function endOfDay(date) {
+  const d = new Date(date);
+  d.setHours(23, 59, 59, 999);
+  return d;
+}
+
+function chipRange(chip) {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+  if (chip === 'Today') {
+    return { from: today, to: endOfDay(today) };
+  }
+  if (chip === 'Last 7 days') {
+    const from = new Date(today);
+    from.setDate(from.getDate() - 6);
+    return { from, to: endOfDay(today) };
+  }
+  if (chip === 'This month') {
+    const from = new Date(today.getFullYear(), today.getMonth(), 1);
+    return { from, to: endOfDay(today) };
+  }
+  return { from: null, to: null };
+}
 
 const fmtDate = (d) => {
   if (!d) return '-';
@@ -147,6 +222,44 @@ function SessionCard({ session }) {
     () => session.endAddress || (session.endLocation ? memoryAddressCache.get(`${session.endLocation.latitude},${session.endLocation.longitude}`) : null)
   );
 
+  const [startPhotoUrl, setStartPhotoUrl] = useState(() => session.startPhotoUri || null);
+  const [endPhotoUrl, setEndPhotoUrl] = useState(() => session.endPhotoUri || null);
+  const [routePhotoUrl, setRoutePhotoUrl] = useState(() => session.routePhotoUri || null);
+
+  useEffect(() => {
+    let active = true;
+
+    const startEvId = session.startSpeedometerEvidenceId ||
+      (Array.isArray(session.evidence) && session.evidence.find((e) => e.kind === 'START_SPEEDOMETER')?.evidenceId);
+    if (!session.startPhotoUri && startEvId) {
+      getPhotoUrl(startEvId).then((url) => {
+        if (active && url) setStartPhotoUrl(url);
+      });
+    }
+
+    const endEvId = session.endSpeedometerEvidenceId ||
+      (Array.isArray(session.evidence) && session.evidence.find((e) => e.kind === 'END_SPEEDOMETER')?.evidenceId);
+    if (!session.endPhotoUri && endEvId) {
+      getPhotoUrl(endEvId).then((url) => {
+        if (active && url) setEndPhotoUrl(url);
+      });
+    }
+
+    const routeEvId = session.routeEvidenceId ||
+      (Array.isArray(session.evidence) && session.evidence.find((e) => e.kind === 'ROUTE')?.evidenceId);
+    if (!session.routePhotoUri && routeEvId) {
+      getPhotoUrl(routeEvId).then((url) => {
+        if (active && url) setRoutePhotoUrl(url);
+      });
+    }
+
+    return () => { active = false; };
+  }, [
+    session.startPhotoUri, session.endPhotoUri, session.routePhotoUri,
+    session.startSpeedometerEvidenceId, session.endSpeedometerEvidenceId, session.routeEvidenceId,
+    session.evidence,
+  ]);
+
   useEffect(() => {
     let active = true;
     if (!session.startAddress && session.startLocation?.latitude != null && session.startLocation?.longitude != null) {
@@ -169,7 +282,7 @@ function SessionCard({ session }) {
               setLazyStartAddress(line);
             }
           }
-        }).catch(() => {});
+        }).catch(() => { });
       }
     }
 
@@ -193,7 +306,7 @@ function SessionCard({ session }) {
               setLazyEndAddress(line);
             }
           }
-        }).catch(() => {});
+        }).catch(() => { });
       }
     }
 
@@ -227,8 +340,10 @@ function SessionCard({ session }) {
         </View>
       </View>
 
-      {/* NLP Summary Badge */}
-      <NlpBadge category={nlpCategory} summary={nlpSummary} />
+      {/* NLP Summary Badge: shown only for old recoveries with no customerMet field */}
+      {!hasMetField ? (
+        <NlpBadge category={nlpCategory} summary={nlpSummary} />
+      ) : null}
 
       {/* Customer visited label */}
       {visitedLabel ? (
@@ -245,6 +360,30 @@ function SessionCard({ session }) {
           ]}>
             {visitedLabel}
           </Text>
+        </View>
+      ) : null}
+
+      {/* Speedometer & Route Thumbnails */}
+      {(startPhotoUrl || endPhotoUrl || routePhotoUrl) ? (
+        <View style={styles.thumbnailRow}>
+          {startPhotoUrl ? (
+            <View style={styles.thumbWrapper}>
+              <Image source={{ uri: startPhotoUrl }} style={styles.thumbnail} />
+              <Text style={styles.thumbLabel}>Start</Text>
+            </View>
+          ) : null}
+          {endPhotoUrl ? (
+            <View style={styles.thumbWrapper}>
+              <Image source={{ uri: endPhotoUrl }} style={styles.thumbnail} />
+              <Text style={styles.thumbLabel}>End</Text>
+            </View>
+          ) : null}
+          {routePhotoUrl ? (
+            <View style={styles.thumbWrapper}>
+              <Image source={{ uri: routePhotoUrl }} style={styles.thumbnail} />
+              <Text style={styles.thumbLabel}>Route</Text>
+            </View>
+          ) : null}
         </View>
       ) : null}
 
@@ -316,7 +455,7 @@ export default function ProfileScreen({ navigation }) {
             setStaff(authProf.staff);
             await SecureStore.setItemAsync('staff', JSON.stringify(authProf.staff));
           }
-        } catch (err2) {}
+        } catch (err2) { }
       }
 
       // Load recovery history for authenticated agent
@@ -381,6 +520,108 @@ export default function ProfileScreen({ navigation }) {
     ...pendingSessions.filter(p => !sessions.some(s => s.sessionId === p.sessionId || s.deviceSessionId === p.deviceSessionId)),
     ...sessions,
   ];
+
+  // ── Recoveries Per Day Filter State ─────────────────────────────────────────
+  const [selectedChip, setSelectedChip] = useState('Last 7 days');
+  const [fromText, setFromText] = useState(() => {
+    const { from } = chipRange('Last 7 days');
+    return formatDDMMYYYY(from);
+  });
+  const [toText, setToText] = useState(() => {
+    const { to } = chipRange('Last 7 days');
+    return formatDDMMYYYY(to);
+  });
+  const [rangeError, setRangeError] = useState('');
+  const [expandedDays, setExpandedDays] = useState({});
+
+  function handleChip(chip) {
+    setSelectedChip(chip);
+    setRangeError('');
+    const { from, to } = chipRange(chip);
+    setFromText(from ? formatDDMMYYYY(from) : '');
+    setToText(to ? formatDDMMYYYY(to) : '');
+  }
+
+  function handleClear() {
+    setSelectedChip('All');
+    setRangeError('');
+    setFromText('');
+    setToText('');
+  }
+
+  function handleFromChange(text) {
+    setFromText(text);
+    setSelectedChip('');
+    setRangeError('');
+  }
+
+  function handleToChange(text) {
+    setToText(text);
+    setSelectedChip('');
+    setRangeError('');
+  }
+
+  const { fromDate, toDate, error } = useMemo(() => {
+    if (selectedChip === 'All' || (!fromText && !toText)) {
+      return { fromDate: null, toDate: null, error: '' };
+    }
+    if (selectedChip && selectedChip !== 'All') {
+      const { from, to } = chipRange(selectedChip);
+      return { fromDate: from, toDate: to, error: '' };
+    }
+    const from = parseUserDate(fromText);
+    const to = parseUserDate(toText);
+    if (!fromText && !toText) return { fromDate: null, toDate: null, error: '' };
+    if (fromText && !from) return { fromDate: null, toDate: null, error: 'Invalid "From" date. Use DD-MM-YYYY.' };
+    if (toText && !to) return { fromDate: null, toDate: null, error: 'Invalid "To" date. Use DD-MM-YYYY.' };
+    const toEnd = to ? endOfDay(to) : null;
+    if (from && toEnd && from > toEnd) {
+      return { fromDate: null, toDate: null, error: 'From date must be before To date.' };
+    }
+    return { fromDate: from || null, toDate: toEnd || null, error: '' };
+  }, [selectedChip, fromText, toText]);
+
+  const activeError = rangeError || error;
+
+  const { rows, totalInRange } = useMemo(() => {
+    const counts = {};
+    const sessionsMap = {};
+
+    for (const session of allSessions) {
+      const rawDate = session.startTime || session.endTime;
+      const key = toLocalDateKey(rawDate);
+      if (!key) continue;
+
+      if (fromDate || toDate) {
+        const sessionDate = new Date(rawDate);
+        if (fromDate && sessionDate < fromDate) continue;
+        if (toDate && sessionDate > toDate) continue;
+      }
+
+      counts[key] = (counts[key] || 0) + 1;
+      if (!sessionsMap[key]) sessionsMap[key] = [];
+      sessionsMap[key].push(session);
+    }
+
+    // Day rows sorted with newest day first
+    const sortedKeys = Object.keys(counts).sort((a, b) => b.localeCompare(a));
+    const rows = sortedKeys.map((key) => {
+      // Recoveries inside a day sorted with newest first
+      const daySessions = (sessionsMap[key] || []).slice().sort((a, b) => {
+        const timeA = new Date(a.endTime || a.startTime || 0).getTime();
+        const timeB = new Date(b.endTime || b.startTime || 0).getTime();
+        return timeB - timeA;
+      });
+      return { dateKey: key, count: counts[key], sessions: daySessions };
+    });
+    const totalInRange = rows.reduce((sum, r) => sum + r.count, 0);
+
+    return { rows, totalInRange };
+  }, [allSessions, fromDate, toDate]);
+
+  const toggleDay = (key) => {
+    setExpandedDays((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
 
   if (loading) {
     return (
@@ -480,18 +721,116 @@ export default function ProfileScreen({ navigation }) {
         </View>
       ) : null}
 
-      {/* ── RECOVERIES PER DAY ─────────────────────────────────────────── */}
-      <TouchableOpacity
-        style={styles.recoveriesPerDayRow}
-        onPress={() => navigation.navigate('RecoveriesPerDay', { sessions: allSessions })}
-        activeOpacity={0.7}
-      >
-        <View style={styles.recoveriesPerDayLeft}>
-          <Ionicons name="calendar-outline" size={18} color="#2563EB" style={{ marginRight: 10 }} />
-          <Text style={styles.recoveriesPerDayTitle}>Recoveries Per Day</Text>
+      {/* ── RECOVERIES PER DAY (INLINE SECTION) ────────────────────────── */}
+      <View style={styles.recoveriesPerDaySection}>
+        <View style={styles.historyHeaderRow}>
+          <Text style={styles.historySectionTitle}>Recoveries Per Day</Text>
+          <Text style={styles.historyCountText}>{totalInRange} In Range</Text>
         </View>
-        <Ionicons name="chevron-forward" size={18} color="#94A3B8" />
-      </TouchableOpacity>
+
+        {/* Filter card */}
+        <View style={styles.filterCard}>
+          {/* Quick chips */}
+          <View style={styles.chipsRow}>
+            {CHIPS.map((chip) => (
+              <TouchableOpacity
+                key={chip}
+                style={[styles.chip, selectedChip === chip && styles.chipActive]}
+                onPress={() => handleChip(chip)}
+                activeOpacity={0.7}
+              >
+                <Text style={[styles.chipText, selectedChip === chip && styles.chipTextActive]}>
+                  {chip}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          {/* From / To inputs */}
+          <View style={styles.inputRow}>
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>From</Text>
+              <TextInput
+                style={styles.textInput}
+                value={fromText}
+                onChangeText={handleFromChange}
+                placeholder="DD-MM-YYYY"
+                keyboardType="numeric"
+                maxLength={10}
+                placeholderTextColor="#94A3B8"
+              />
+            </View>
+            <View style={styles.inputSeparator} />
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>To</Text>
+              <TextInput
+                style={styles.textInput}
+                value={toText}
+                onChangeText={handleToChange}
+                placeholder="DD-MM-YYYY"
+                keyboardType="numeric"
+                maxLength={10}
+                placeholderTextColor="#94A3B8"
+              />
+            </View>
+          </View>
+
+          {/* Error message */}
+          {activeError ? (
+            <Text style={styles.errorText}>{activeError}</Text>
+          ) : null}
+
+          {/* Clear button */}
+          <TouchableOpacity style={styles.clearBtn} onPress={handleClear} activeOpacity={0.7}>
+            <Ionicons name="close-circle-outline" size={14} color="#64748B" style={{ marginRight: 4 }} />
+            <Text style={styles.clearBtnText}>Clear</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Day rows list */}
+        {rows.length === 0 ? (
+          <View style={styles.emptyFilterCard}>
+            <Ionicons name="calendar-outline" size={32} color="#94A3B8" />
+            <Text style={styles.emptyFilterTitle}>No recoveries in this range</Text>
+          </View>
+        ) : (
+          <View style={styles.dayListCard}>
+            {rows.map((row, idx) => {
+              const isExpanded = !!expandedDays[row.dateKey];
+              return (
+                <View key={row.dateKey} style={idx < rows.length - 1 && !isExpanded && styles.dayRowBorder}>
+                  <TouchableOpacity
+                    style={styles.dayRow}
+                    onPress={() => toggleDay(row.dateKey)}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={styles.dayDate}>{keyToDisplay(row.dateKey)}</Text>
+                    <View style={styles.dayRowRight}>
+                      <Text style={styles.dayCount}>{row.count}</Text>
+                      <Ionicons
+                        name={isExpanded ? 'chevron-up' : 'chevron-down'}
+                        size={16}
+                        color="#94A3B8"
+                        style={{ marginLeft: 8 }}
+                      />
+                    </View>
+                  </TouchableOpacity>
+                  {isExpanded ? (
+                    <View style={styles.dayExpandedList}>
+                      {row.sessions.map((s, si) => (
+                        <SessionCard
+                          key={s._id || s.sessionId || s.deviceSessionId || si}
+                          session={s}
+                        />
+                      ))}
+                    </View>
+                  ) : null}
+                </View>
+              );
+            })}
+          </View>
+        )}
+      </View>
 
       {/* ── COMPLETED RECOVERY HISTORY ─────────────────────────────────── */}
       <View style={styles.historyHeaderRow}>
@@ -629,6 +968,72 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: '#BFDBFE', marginBottom: 8, alignSelf: 'flex-start',
   },
   playVoiceBtnText: { fontSize: 12, fontWeight: '700', color: '#2563EB' },
+  recoveriesPerDaySection: { marginBottom: 20 },
+  filterCard: {
+    backgroundColor: '#FFFFFF', borderRadius: 14, padding: 14,
+    borderWidth: 1, borderColor: '#E2E8F0', marginBottom: 12,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.03, shadowRadius: 4, elevation: 1,
+  },
+  chipsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 12 },
+  chip: {
+    paddingHorizontal: 10, paddingVertical: 5, borderRadius: 18,
+    backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0',
+  },
+  chipActive: { backgroundColor: '#EFF6FF', borderColor: '#93C5FD' },
+  chipText: { fontSize: 11, fontWeight: '600', color: '#64748B' },
+  chipTextActive: { color: '#2563EB' },
+  inputRow: { flexDirection: 'row', alignItems: 'flex-end', marginBottom: 8 },
+  inputGroup: { flex: 1 },
+  inputLabel: { fontSize: 10, fontWeight: '600', color: '#64748B', textTransform: 'uppercase', marginBottom: 3 },
+  textInput: {
+    borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 8,
+    paddingHorizontal: 8, paddingVertical: 6,
+    fontSize: 12, fontWeight: '600', color: '#0F172A',
+    backgroundColor: '#F8FAFC',
+  },
+  inputSeparator: { width: 10 },
+  errorText: { fontSize: 11, color: '#DC2626', fontWeight: '600', marginBottom: 6 },
+  clearBtn: {
+    flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start',
+    paddingVertical: 3, paddingHorizontal: 2,
+  },
+  clearBtnText: { fontSize: 11, color: '#64748B', fontWeight: '600' },
+  emptyFilterCard: {
+    backgroundColor: '#FFFFFF', borderRadius: 14, padding: 24,
+    alignItems: 'center', borderWidth: 1, borderColor: '#E2E8F0', marginBottom: 14,
+  },
+  emptyFilterTitle: { fontSize: 13, fontWeight: '600', color: '#64748B', marginTop: 8, textAlign: 'center' },
+  dayListCard: {
+    backgroundColor: '#FFFFFF', borderRadius: 14, borderWidth: 1,
+    borderColor: '#E2E8F0', marginBottom: 14,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.03, shadowRadius: 4, elevation: 1,
+    overflow: 'hidden',
+  },
+  dayRow: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingHorizontal: 16, paddingVertical: 14,
+  },
+  dayRowBorder: { borderBottomWidth: 1, borderBottomColor: '#F1F5F9' },
+  dayRowSeparator: { borderBottomWidth: 1, borderBottomColor: '#F1F5F9' },
+  dayDate: { fontSize: 14, fontWeight: '700', color: '#1E293B' },
+  dayRowRight: { flexDirection: 'row', alignItems: 'center' },
+  dayCount: { fontSize: 15, fontWeight: '800', color: '#2563EB' },
+  dayExpandedList: {
+    paddingHorizontal: 12, paddingTop: 6, paddingBottom: 6,
+    backgroundColor: '#F8FAFC', borderTopWidth: 1, borderTopColor: '#F1F5F9',
+  },
+  thumbnailRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    marginTop: 10, marginBottom: 4,
+  },
+  thumbWrapper: { alignItems: 'center' },
+  thumbnail: {
+    width: 64, height: 64, borderRadius: 8,
+    backgroundColor: '#E2E8F0', borderWidth: 1, borderColor: '#CBD5E1',
+  },
+  thumbLabel: { fontSize: 11, fontWeight: '700', color: '#64748B', marginTop: 3 },
   recoveriesPerDayRow: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     backgroundColor: '#FFFFFF', borderRadius: 14, padding: 16,

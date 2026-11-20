@@ -8,6 +8,7 @@ import * as Location from 'expo-location';
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
 import { apiUploadFile, apiPost, apiGet } from '../api';
+import { getAccurateLocation } from '../utils/geo';
 
 function generateDeviceSessionId() {
   const ts = Date.now().toString(36);
@@ -253,21 +254,12 @@ export default function StartRecoveryScreen({ route, navigation }) {
       }
       console.log('[StartRecovery] LOCATION_PERMISSION_GRANTED');
 
-      // ── Step 2: GPS acquisition with 15-second hard timeout ────────────────
+      // ── Step 2: GPS acquisition: wait up to 15 s for accuracy <= 20 m (BestForNavigation) ──
       console.log('[StartRecovery] GPS_ACQUISITION_STARTED');
-      const GPS_TIMEOUT_MS = 15000;
 
       let pos;
       try {
-        pos = await Promise.race([
-          Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }),
-          new Promise((_, reject) =>
-            setTimeout(
-              () => reject(new Error('GPS_TIMEOUT')),
-              GPS_TIMEOUT_MS
-            )
-          ),
-        ]);
+        pos = await getAccurateLocation({ timeoutMs: 15000, targetAccuracy: 20 });
       } catch (gpsErr) {
         if (gpsErr.message === 'GPS_TIMEOUT') {
           console.log('[StartRecovery] START_FAILED reason=gps_timeout');
@@ -284,6 +276,9 @@ export default function StartRecoveryScreen({ route, navigation }) {
         latitude: pos.coords.latitude,
         longitude: pos.coords.longitude,
         accuracy: pos.coords.accuracy || 0,
+        startLatitude: pos.coords.latitude,
+        startLongitude: pos.coords.longitude,
+        startAccuracy: pos.coords.accuracy || 0,
       };
       console.log('[StartRecovery] GPS_ACQUISITION_SUCCESS', {
         lat: initialLocation.latitude.toFixed(5),
@@ -331,12 +326,21 @@ export default function StartRecoveryScreen({ route, navigation }) {
 
       console.log('[StartRecovery] API_REQUEST_SUCCESS', { sessionId: data?.session?.sessionId });
 
-      const createdSession = (data && data.session) ? data.session : {
+      const createdSession = (data && data.session) ? {
+        ...data.session,
+        startLocation: data.session.startLocation || initialLocation,
+        startLatitude: initialLocation.latitude,
+        startLongitude: initialLocation.longitude,
+        startAccuracy: initialLocation.accuracy,
+      } : {
         sessionId: deviceSessionId,
         deviceSessionId,
         vehicleType: transportMode,
         vehicleNumber: needsVehicle ? vehicleNumber.trim().toUpperCase() : '',
         startLocation: initialLocation,
+        startLatitude: initialLocation.latitude,
+        startLongitude: initialLocation.longitude,
+        startAccuracy: initialLocation.accuracy,
         startTime: new Date().toISOString(),
         plannedLocation,
         plannedPersonCount: personCount,

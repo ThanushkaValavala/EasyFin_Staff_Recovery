@@ -81,6 +81,7 @@ export async function savePendingSession(session) {
       'mode:', session.transportMode || session.vehicleType,
       'startPhoto:', session.startPhotoUri ? 'present' : 'none',
       'endPhoto:', session.endPhotoUri ? 'present' : 'none',
+      'routePhoto:', session.routePhotoUri ? 'present' : 'none',
       'voice:', session.voiceUri ? 'present' : 'none',
       'customerMet:', session.customerMet,
       'points:', (session.points || []).length
@@ -199,6 +200,15 @@ export async function syncPendingSessions() {
               }).catch(() => {});
             }
 
+            if (session.routePhotoUri) {
+              await apiUploadFile(
+                `/recovery/sessions/${session.sessionId}/evidence`,
+                { kind: 'ROUTE' },
+                'photo',
+                session.routePhotoUri
+              ).catch(() => {});
+            }
+
             console.log('[offlineStore] Confirmed sync for online session:', session.sessionId);
             synced++;
             continue;
@@ -253,6 +263,14 @@ export async function syncPendingSessions() {
           );
 
           console.log('[offlineStore] Confirmed sync for full offline Bike/Car session:', session.deviceSessionId);
+          if (session.routePhotoUri) {
+            await apiUploadFile(
+              `/recovery/sessions/${session.sessionId}/evidence`,
+              { kind: 'ROUTE' },
+              'photo',
+              session.routePhotoUri
+            ).catch(() => {});
+          }
           synced++;
         } else {
           // WALK or OTHER: sync — with voice if present, otherwise plain JSON
@@ -292,6 +310,14 @@ export async function syncPendingSessions() {
           }
 
           console.log(`[offlineStore] Confirmed sync for ${mode} session:`, session.deviceSessionId);
+          if (session.routePhotoUri) {
+            await apiUploadFile(
+              `/recovery/sessions/${session.sessionId}/evidence`,
+              { kind: 'ROUTE' },
+              'photo',
+              session.routePhotoUri
+            ).catch(() => {});
+          }
           synced++;
         }
       } catch (err) {

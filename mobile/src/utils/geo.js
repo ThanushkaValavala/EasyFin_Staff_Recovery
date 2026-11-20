@@ -1,3 +1,5 @@
+import * as Location from 'expo-location';
+
 // Distance between two GPS points, in meters (haversine formula)
 export function distanceMeters(a, b) {
   const R = 6371000;
@@ -104,4 +106,88 @@ export function formatDuration(totalSeconds) {
   const sec = s % 60;
   const pad = (n) => String(n).padStart(2, '0');
   return (h > 0 ? h + ':' : '') + pad(m) + ':' + pad(sec);
+}
+
+/**
+ * Acquire a fresh GPS fix with Location.Accuracy.BestForNavigation.
+ * Waits up to timeoutMs (default 15s) for a fix with accuracy <= targetAccuracy (default 20m).
+ * If none arrives within timeoutMs, uses the most accurate fix collected during that time.
+ * If no fix arrives at all, rejects with Error('GPS_TIMEOUT').
+ * Never uses cached or last-known positions.
+ */
+export async function getAccurateLocation({ timeoutMs = 15000, targetAccuracy = 20 } = {}) {
+  let sub = null;
+  let timer = null;
+  let bestFix = null;
+
+  return new Promise((resolve, reject) => {
+    let resolved = false;
+
+    const cleanup = () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      if (sub && typeof sub.remove === 'function') {
+        try { sub.remove(); } catch (e) {}
+        sub = null;
+      }
+    };
+
+    const finish = (fix) => {
+      if (resolved) return;
+      resolved = true;
+      cleanup();
+      if (fix && fix.coords) {
+        resolve(fix);
+      } else {
+        reject(new Error('GPS_TIMEOUT'));
+      }
+    };
+
+    timer = setTimeout(() => {
+      if (bestFix) {
+        finish(bestFix);
+      } else {
+        finish(null);
+      }
+    }, timeoutMs);
+
+    Location.watchPositionAsync(
+      {
+        accuracy: Location.Accuracy.BestForNavigation,
+        timeInterval: 500,
+        distanceInterval: 0,
+      },
+      (loc) => {
+        if (!loc || !loc.coords) return;
+        const acc = loc.coords.accuracy != null ? loc.coords.accuracy : Infinity;
+        if (!bestFix || acc < (bestFix.coords.accuracy != null ? bestFix.coords.accuracy : Infinity)) {
+          bestFix = loc;
+        }
+        if (acc <= targetAccuracy) {
+          finish(loc);
+        }
+      }
+    ).then((subscription) => {
+      if (resolved) {
+        try { subscription.remove(); } catch (e) {}
+      } else {
+        sub = subscription;
+      }
+    }).catch(() => {
+      Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.BestForNavigation })
+        .then((loc) => {
+          if (!loc || !loc.coords) return;
+          const acc = loc.coords.accuracy != null ? loc.coords.accuracy : Infinity;
+          if (!bestFix || acc < (bestFix.coords.accuracy != null ? bestFix.coords.accuracy : Infinity)) {
+            bestFix = loc;
+          }
+          if (acc <= targetAccuracy) {
+            finish(loc);
+          }
+        })
+        .catch(() => {});
+    });
+  });
 }
