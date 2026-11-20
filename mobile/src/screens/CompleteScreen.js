@@ -7,11 +7,34 @@ import {
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
 import { Ionicons } from '@expo/vector-icons';
-import { useAudioRecorder, AudioModule, RecordingPresets } from 'expo-audio';
+import { useAudioRecorder, AudioModule, createAudioPlayer, setAudioModeAsync } from 'expo-audio';
+import { File, Paths } from 'expo-file-system';
 import { apiUploadFile, apiPost, apiUploadFiles, apiGet } from '../api';
 import { formatDistance, formatDuration } from '../utils/geo';
 import { savePendingSession } from '../utils/offlineStore';
 import { checkHasNumbers } from '../utils/speedometerCheck';
+
+if (!Object.prototype.hasOwnProperty.call(File.prototype, 'type')) {
+  Object.defineProperty(File.prototype, 'type', {
+    get() {
+      if (this._type) return this._type;
+      const ext = (this.extension || '').toLowerCase();
+      if (ext === '.m4a' || ext === '.mp4') return 'audio/mp4';
+      if (ext === '.aac') return 'audio/aac';
+      if (ext === '.mp3') return 'audio/mpeg';
+      if (ext === '.wav') return 'audio/wav';
+      if (ext === '.caf') return 'audio/x-caf';
+      if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+      if (ext === '.png') return 'image/png';
+      if (ext === '.webp') return 'image/webp';
+      return 'application/octet-stream';
+    },
+    set(v) {
+      this._type = v;
+    },
+    configurable: true,
+  });
+}
 
 function isNetworkError(e) {
   if (!e) return false;
@@ -72,6 +95,28 @@ function fmtRecordTime(secs) {
 
 const MAX_RECORD_SECONDS = 180; // 3 minutes
 
+const VOICE_RECORDING_OPTIONS = {
+  extension: '.m4a',
+  sampleRate: 44100,
+  numberOfChannels: 1,
+  bitRate: 64000,
+  android: {
+    outputFormat: 'mpeg4',
+    audioEncoder: 'aac',
+  },
+  ios: {
+    outputFormat: 'aac ',
+    audioQuality: 64, // Medium quality
+    linearPCMBitDepth: 16,
+    linearPCMIsBigEndian: false,
+    linearPCMIsFloat: false,
+  },
+  web: {
+    mimeType: 'audio/mp4',
+    bitsPerSecond: 64000,
+  },
+};
+
 /**
  * VoiceRecorder component
  * States: idle → recording → recorded → (can re-record or play)
@@ -80,7 +125,7 @@ const MAX_RECORD_SECONDS = 180; // 3 minutes
  *   onCleared() — called when recording is cleared
  */
 function VoiceRecorder({ onRecorded, onCleared }) {
-  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const audioRecorder = useAudioRecorder(VOICE_RECORDING_OPTIONS);
   const [recorderState, setRecorderState] = useState('idle'); // idle | recording | recorded
   const [recordedUri, setRecordedUri] = useState(null);
   const [recordedDuration, setRecordedDuration] = useState(0);
@@ -88,14 +133,18 @@ function VoiceRecorder({ onRecorded, onCleared }) {
   const [permDenied, setPermDenied] = useState(false);
   const [playerState, setPlayerState] = useState('stopped'); // stopped | playing
   const timerRef = useRef(null);
-  const playerRef = useRef(null); // expo-audio Sound ref
+  const playerRef = useRef(null);
 
   // cleanup on unmount
   useEffect(() => {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
       if (playerRef.current) {
-        playerRef.current.remove().catch(() => { });
+        try {
+          playerRef.current.pause();
+          playerRef.current.remove();
+        } catch (_) {}
+        playerRef.current = null;
       }
     };
   }, []);
@@ -109,6 +158,21 @@ function VoiceRecorder({ onRecorded, onCleared }) {
     }
     setPermDenied(false);
     try {
+      if (playerRef.current) {
+        try {
+          playerRef.current.pause();
+          playerRef.current.remove();
+        } catch (_) {}
+        playerRef.current = null;
+      }
+      setPlayerState('stopped');
+
+      await setAudioModeAsync({
+        allowsRecording: true,
+        playsInSilentMode: true,
+        shouldRouteThroughEarpiece: false,
+      });
+
       await audioRecorder.prepareToRecordAsync();
       audioRecorder.record();
       setRecorderState('recording');
@@ -134,11 +198,32 @@ function VoiceRecorder({ onRecorded, onCleared }) {
     }
     try {
       const uri = await audioRecorder.stop();
+      // Switch audio mode to playback immediately
+      await setAudioModeAsync({
+        allowsRecording: false,
+        playsInSilentMode: true,
+        shouldRouteThroughEarpiece: false,
+      });
+
+      // Save as voice.m4a with explicit audio/mp4 type in cache
+      let finalUri = uri;
+      try {
+        const src = new File(uri);
+        const target = new File(Paths.cache, 'voice.m4a');
+        if (target.exists) {
+          try { target.delete(); } catch (_) {}
+        }
+        await src.copy(target);
+        finalUri = target.uri;
+      } catch (_) {
+        finalUri = uri;
+      }
+
       const dur = elapsed;
-      setRecordedUri(uri);
+      setRecordedUri(finalUri);
       setRecordedDuration(dur);
       setRecorderState('recorded');
-      onRecorded && onRecorded(uri, dur);
+      onRecorded && onRecorded(finalUri, dur);
     } catch (err) {
       Alert.alert('Recording Error', err.message || 'Could not stop recording.');
       setRecorderState('idle');
@@ -153,7 +238,10 @@ function VoiceRecorder({ onRecorded, onCleared }) {
     setRecorderState('idle');
     setPlayerState('stopped');
     if (playerRef.current) {
-      await playerRef.current.remove().catch(() => { });
+      try {
+        playerRef.current.pause();
+        playerRef.current.remove();
+      } catch (_) {}
       playerRef.current = null;
     }
     onCleared && onCleared();
@@ -162,28 +250,39 @@ function VoiceRecorder({ onRecorded, onCleared }) {
   const playRecording = async () => {
     if (!recordedUri) return;
     if (playerState === 'playing') {
-      // stop playback
+      // pause playback
       if (playerRef.current) {
-        await playerRef.current.pauseAsync().catch(() => { });
+        try {
+          playerRef.current.pause();
+        } catch (_) {}
       }
       setPlayerState('stopped');
       return;
     }
     try {
-      const { AudioPlayer } = await import('expo-audio');
+      await setAudioModeAsync({
+        allowsRecording: false,
+        playsInSilentMode: true,
+        shouldRouteThroughEarpiece: false,
+      });
+
       if (playerRef.current) {
-        await playerRef.current.remove().catch(() => { });
+        try {
+          playerRef.current.remove();
+        } catch (_) {}
+        playerRef.current = null;
       }
-      const player = new AudioPlayer(recordedUri);
+
+      const player = createAudioPlayer(recordedUri);
       playerRef.current = player;
-      player.play();
-      setPlayerState('playing');
-      // Reset icon when done
       player.addListener('playbackStatusUpdate', (status) => {
         if (status.didJustFinish) {
           setPlayerState('stopped');
+          player.seekTo(0).catch(() => {});
         }
       });
+      player.play();
+      setPlayerState('playing');
     } catch (err) {
       Alert.alert('Playback Error', err.message || 'Could not play recording.');
     }
@@ -325,6 +424,7 @@ export default function CompleteScreen({ route, navigation }) {
   const [checkingPhoto, setCheckingPhoto] = useState(false);
   const [speedometerFailedTries, setSpeedometerFailedTries] = useState(0);
   const [speedometerCheckError, setSpeedometerCheckError] = useState('');
+  const [speedometerSkippedReason, setSpeedometerSkippedReason] = useState(null);
   const [lastSpeedometerPhoto, setLastSpeedometerPhoto] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [startText, setStartText] = useState('Locating...');
@@ -399,8 +499,10 @@ export default function CompleteScreen({ route, navigation }) {
           setSpeedometerCheckError('');
           setSpeedometerFailedTries(0);
           setLastSpeedometerPhoto(null);
+          setSpeedometerSkippedReason(checkRes.skipped ? (checkRes.reason || 'error') : null);
         } else {
           setPhoto(null);
+          setSpeedometerSkippedReason(null);
           const nextTries = speedometerFailedTries + 1;
           setSpeedometerFailedTries(nextTries);
           setLastSpeedometerPhoto(capturedUri);
@@ -412,6 +514,11 @@ export default function CompleteScreen({ route, navigation }) {
         setSpeedometerCheckError('');
         setSpeedometerFailedTries(0);
         setLastSpeedometerPhoto(null);
+        let reason = 'error';
+        if (err && typeof err.name === 'string' && err.name && err.name !== 'Error' && /^[A-Za-z0-9_]+$/.test(err.name)) {
+          reason = err.name;
+        }
+        setSpeedometerSkippedReason(reason);
       } finally {
         setCheckingPhoto(false);
       }
@@ -424,6 +531,7 @@ export default function CompleteScreen({ route, navigation }) {
       setSpeedometerCheckError('');
       setSpeedometerFailedTries(0);
       setLastSpeedometerPhoto(null);
+      setSpeedometerSkippedReason(null);
     }
   };
 
@@ -752,6 +860,11 @@ export default function CompleteScreen({ route, navigation }) {
           ) : photo ? (
             <View style={styles.previewBox}>
               <Image source={{ uri: photo }} style={styles.previewImage} resizeMode="cover" />
+              {speedometerSkippedReason ? (
+                <Text style={styles.speedometerSkippedText}>
+                  Number check could not run ({speedometerSkippedReason}). Photo accepted.
+                </Text>
+              ) : null}
               <TouchableOpacity style={styles.retakeBtn} onPress={takeEndingPhoto}>
                 <Ionicons name="camera-reverse-outline" size={16} color="#2563EB" style={{ marginRight: 6 }} />
                 <Text style={styles.retakeBtnText}>Retake Photo</Text>
@@ -994,6 +1107,12 @@ const styles = StyleSheet.create({
     alignItems: 'center', borderWidth: 1, borderColor: '#E2E8F0',
   },
   previewImage: { width: '100%', height: 190, borderRadius: 10 },
+  speedometerSkippedText: {
+    color: '#64748B',
+    fontSize: 12,
+    marginTop: 8,
+    textAlign: 'center',
+  },
   retakeBtn: {
     flexDirection: 'row', alignItems: 'center', marginTop: 12,
     paddingVertical: 7, paddingHorizontal: 14,

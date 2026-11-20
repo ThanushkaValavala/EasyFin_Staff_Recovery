@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
   ActivityIndicator, RefreshControl, Alert, Modal, Image, Platform,
@@ -7,25 +7,21 @@ import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
 import * as Location from 'expo-location';
+import { createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import { apiGet } from '../api';
 import { API_URL } from '../config';
 import { BADGE_COLORS } from '../utils/nlpSummarizer';
 import { cacheHistory, getCachedHistory, getPendingSessions, syncPendingSessions } from '../utils/offlineStore';
 
-/** Fetch signed voice URL and play it. Errors are handled quietly. */
-async function playVoiceNote(sessionId) {
-  try {
-    const res = await apiGet(`/recovery/sessions/${sessionId}/voice-url`);
-    const url = res?.url || res?.signedUrl || res?.voiceUrl;
-    if (!url) return;
-    const { AudioPlayer } = await import('expo-audio');
-    const player = new AudioPlayer(url);
-    player.play();
-  } catch (e) {
-    // handle quietly
-    console.warn('[ProfileScreen] Voice playback error:', e.message);
-  }
-}
+let activeProfileVoiceCard = null; // { sessionId, stop() }
+
+const fmtVoiceDuration = (s) => {
+  if (s == null || isNaN(s)) return '';
+  const total = Math.max(0, Math.round(s));
+  const m = Math.floor(total / 60);
+  const sec = total % 60;
+  return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+};
 
 const memoryAddressCache = new Map();
 
@@ -100,15 +96,21 @@ function InfoRow({ icon, label, value, wrapValue }) {
   );
 }
 
+// Cache entry: { source: { uri: string, headers?: object }, fetchedAt: number, isSigned: boolean }
 const evidenceSourceCache = new Map();
 const evidenceInFlightCache = new Map();
 
-async function resolveEvidenceSource(evidenceId) {
+async function resolveEvidenceSource(evidenceId, forceFresh = false) {
   if (!evidenceId) return null;
-  if (evidenceSourceCache.has(evidenceId)) {
-    return evidenceSourceCache.get(evidenceId);
+  const now = Date.now();
+  if (!forceFresh && evidenceSourceCache.has(evidenceId)) {
+    const cached = evidenceSourceCache.get(evidenceId);
+    // Non-signed URLs (/image) never expire. Signed URLs expire after 300s, treat as expired after 240s (4 mins)
+    if (!cached.isSigned || (now - cached.fetchedAt < 240000)) {
+      return cached.source;
+    }
   }
-  if (evidenceInFlightCache.has(evidenceId)) {
+  if (!forceFresh && evidenceInFlightCache.has(evidenceId)) {
     return evidenceInFlightCache.get(evidenceId);
   }
 
@@ -118,21 +120,21 @@ async function resolveEvidenceSource(evidenceId) {
       const res = await apiGet(`/recovery/evidence/${evidenceId}/url`);
       if (res && res.url) {
         const src = { uri: res.url };
-        evidenceSourceCache.set(evidenceId, src);
+        evidenceSourceCache.set(evidenceId, { source: src, fetchedAt: Date.now(), isSigned: true });
         return src;
       }
     } catch (_e) {
       // Direct image fallback for MongoDB-stored evidence or network/url failure
     }
 
-    // 2. Load /recovery/evidence/:id/image with Authorization header
+    // 2. Load /recovery/evidence/:id/image with Authorization header (no expiry)
     try {
       const token = await SecureStore.getItemAsync('token');
       const src = {
         uri: `${API_URL}/recovery/evidence/${evidenceId}/image`,
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       };
-      evidenceSourceCache.set(evidenceId, src);
+      evidenceSourceCache.set(evidenceId, { source: src, fetchedAt: Date.now(), isSigned: false });
       return src;
     } catch (_err) {
       return null;
@@ -149,19 +151,29 @@ function SpeedometerThumbnail({ label, evidenceId, localUri, onOpen }) {
   const [source, setSource] = useState(() => {
     if (localUri) return { uri: localUri };
     if (evidenceId && evidenceSourceCache.has(evidenceId)) {
-      return evidenceSourceCache.get(evidenceId);
+      const c = evidenceSourceCache.get(evidenceId);
+      if (!c.isSigned || (Date.now() - c.fetchedAt < 240000)) {
+        return c.source;
+      }
     }
     return null;
   });
   const [loading, setLoading] = useState(() => {
     if (localUri) return false;
-    if (evidenceId && evidenceSourceCache.has(evidenceId)) return false;
+    if (evidenceId && evidenceSourceCache.has(evidenceId)) {
+      const c = evidenceSourceCache.get(evidenceId);
+      if (!c.isSigned || (Date.now() - c.fetchedAt < 240000)) {
+        return false;
+      }
+    }
     return !!evidenceId;
   });
   const [loadError, setLoadError] = useState(false);
+  const retriedRef = useRef(false);
 
   useEffect(() => {
     let active = true;
+    retriedRef.current = false;
     if (localUri) {
       setSource({ uri: localUri });
       setLoading(false);
@@ -172,8 +184,10 @@ function SpeedometerThumbnail({ label, evidenceId, localUri, onOpen }) {
       setLoading(false);
       return;
     }
-    if (evidenceSourceCache.has(evidenceId)) {
-      setSource(evidenceSourceCache.get(evidenceId));
+
+    const cached = evidenceSourceCache.get(evidenceId);
+    if (cached && (!cached.isSigned || (Date.now() - cached.fetchedAt < 240000))) {
+      setSource(cached.source);
       setLoading(false);
       setLoadError(false);
       return;
@@ -202,6 +216,31 @@ function SpeedometerThumbnail({ label, evidenceId, localUri, onOpen }) {
     };
   }, [evidenceId, localUri]);
 
+  const handleImageError = () => {
+    // Retry once with a fresh request when signed image fails to load
+    if (!retriedRef.current && evidenceId) {
+      retriedRef.current = true;
+      setLoading(true);
+      resolveEvidenceSource(evidenceId, true)
+        .then((src) => {
+          if (src) {
+            setSource(src);
+            setLoadError(false);
+          } else {
+            setLoadError(true);
+          }
+        })
+        .catch(() => {
+          setLoadError(true);
+        })
+        .finally(() => {
+          setLoading(false);
+        });
+    } else {
+      setLoadError(true);
+    }
+  };
+
   return (
     <View style={styles.thumbnailContainer}>
       <TouchableOpacity
@@ -227,7 +266,7 @@ function SpeedometerThumbnail({ label, evidenceId, localUri, onOpen }) {
             source={source}
             style={styles.thumbnailImage}
             resizeMode="cover"
-            onError={() => setLoadError(true)}
+            onError={handleImageError}
           />
         )}
       </TouchableOpacity>
@@ -274,17 +313,89 @@ function SessionCard({ session }) {
   }
 
   // Voice note
-  const hasVoice = !!(session.voicePath || session.voiceUri);
-  const sessionIdForVoice = session._id || session.sessionId;
+  const hasVoice = Boolean(session.voicePath || session.voiceUri);
+  const sessionIdForVoice = session.sessionId || session._id || session.deviceSessionId;
   const [voicePlaying, setVoicePlaying] = useState(false);
+  const [voiceLoading, setVoiceLoading] = useState(false);
+  const [voiceError, setVoiceError] = useState(false);
+  const cardPlayerRef = useRef(null);
 
-  const handlePlayVoice = async () => {
-    if (!sessionIdForVoice) return;
-    setVoicePlaying(true);
+  const stopVoicePlayback = useCallback(() => {
+    if (cardPlayerRef.current) {
+      try {
+        cardPlayerRef.current.pause();
+        cardPlayerRef.current.remove();
+      } catch (_) {}
+      cardPlayerRef.current = null;
+    }
+    setVoicePlaying(false);
+    setVoiceLoading(false);
+    if (activeProfileVoiceCard && activeProfileVoiceCard.sessionId === sessionIdForVoice) {
+      activeProfileVoiceCard = null;
+    }
+  }, [sessionIdForVoice]);
+
+  useEffect(() => {
+    return () => {
+      stopVoicePlayback();
+    };
+  }, [stopVoicePlayback]);
+
+  const handleToggleVoice = async () => {
+    setVoiceError(false);
+    if (voicePlaying) {
+      stopVoicePlayback();
+      return;
+    }
+
+    if (activeProfileVoiceCard && activeProfileVoiceCard.sessionId !== sessionIdForVoice) {
+      try {
+        activeProfileVoiceCard.stop();
+      } catch (_) {}
+    }
+    activeProfileVoiceCard = { sessionId: sessionIdForVoice, stop: stopVoicePlayback };
+
+    setVoiceLoading(true);
     try {
-      await playVoiceNote(sessionIdForVoice);
+      let voiceUrl = session.voiceUri;
+      if (!voiceUrl && sessionIdForVoice) {
+        // ALWAYS request a fresh link, never cached
+        const res = await apiGet(`/recovery/sessions/${sessionIdForVoice}/voice-url`);
+        voiceUrl = res?.url || res?.signedUrl || res?.voiceUrl;
+      }
+
+      if (!voiceUrl) {
+        setVoiceError(true);
+        setVoiceLoading(false);
+        return;
+      }
+
+      await setAudioModeAsync({
+        allowsRecording: false,
+        playsInSilentMode: true,
+        shouldRouteThroughEarpiece: false,
+      });
+
+      if (cardPlayerRef.current) {
+        try {
+          cardPlayerRef.current.remove();
+        } catch (_) {}
+      }
+
+      const player = createAudioPlayer(voiceUrl);
+      cardPlayerRef.current = player;
+      player.addListener('playbackStatusUpdate', (status) => {
+        if (status.didJustFinish) {
+          setVoicePlaying(false);
+          player.seekTo(0).catch(() => {});
+        }
+      });
+      player.play();
+      setVoicePlaying(true);
+    } catch (_err) {
+      setVoiceError(true);
     } finally {
-      setVoicePlaying(false);
+      setVoiceLoading(false);
     }
   };
 
@@ -398,6 +509,41 @@ function SessionCard({ session }) {
         <NlpBadge category={nlpCategory} summary={nlpSummary} />
       )}
 
+      {/* Voice note row under Met / Not met block */}
+      {hasVoice ? (
+        <View style={styles.voiceNoteRow}>
+          <View style={styles.voiceNoteLeft}>
+            <Ionicons name="mic" size={16} color="#475569" style={{ marginRight: 6 }} />
+            <Text style={styles.voiceNoteLabel}>
+              Voice note{session.voiceDurationSeconds ? ` (${fmtVoiceDuration(session.voiceDurationSeconds)})` : ''}
+            </Text>
+          </View>
+          <TouchableOpacity
+            style={styles.voicePlayBtn}
+            onPress={handleToggleVoice}
+            disabled={voiceLoading}
+            activeOpacity={0.7}
+          >
+            {voiceLoading ? (
+              <ActivityIndicator size="small" color="#2563EB" />
+            ) : (
+              <>
+                <Ionicons
+                  name={voicePlaying ? 'pause-circle-outline' : 'play-circle-outline'}
+                  size={18}
+                  color="#2563EB"
+                  style={{ marginRight: 4 }}
+                />
+                <Text style={styles.voicePlayBtnText}>{voicePlaying ? 'Pause' : 'Play'}</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        </View>
+      ) : null}
+      {voiceError ? (
+        <Text style={styles.voiceErrorText}>Could not play the recording.</Text>
+      ) : null}
+
       {/* Customer visited label */}
       {visitedLabel ? (
         <View style={styles.visitedRow}>
@@ -414,23 +560,6 @@ function SessionCard({ session }) {
             {visitedLabel}
           </Text>
         </View>
-      ) : null}
-
-      {/* Play voice note button */}
-      {hasVoice && sessionIdForVoice ? (
-        <TouchableOpacity
-          style={styles.playVoiceBtn}
-          onPress={handlePlayVoice}
-          disabled={voicePlaying}
-          activeOpacity={0.7}
-        >
-          {voicePlaying ? (
-            <ActivityIndicator size="small" color="#2563EB" style={{ marginRight: 6 }} />
-          ) : (
-            <Ionicons name="play-circle-outline" size={16} color="#2563EB" style={{ marginRight: 6 }} />
-          )}
-          <Text style={styles.playVoiceBtnText}>Play voice note</Text>
-        </TouchableOpacity>
       ) : null}
 
       {/* Speedometer thumbnails */}
@@ -847,12 +976,20 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: '#E2E8F0', marginBottom: 8, alignSelf: 'flex-start',
   },
   visitedText: { fontSize: 12, fontWeight: '700' },
-  playVoiceBtn: {
-    flexDirection: 'row', alignItems: 'center',
-    backgroundColor: '#EFF6FF', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6,
-    borderWidth: 1, borderColor: '#BFDBFE', marginBottom: 8, alignSelf: 'flex-start',
+  voiceNoteRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    backgroundColor: '#F8FAFC', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10,
+    borderWidth: 1, borderColor: '#E2E8F0', marginBottom: 12,
   },
-  playVoiceBtnText: { fontSize: 12, fontWeight: '700', color: '#2563EB' },
+  voiceNoteLeft: { flexDirection: 'row', alignItems: 'center', flex: 1, marginRight: 8 },
+  voiceNoteLabel: { fontSize: 13, fontWeight: '600', color: '#334155' },
+  voicePlayBtn: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: '#EFF6FF', borderRadius: 8, paddingVertical: 6, paddingHorizontal: 12,
+    borderWidth: 1, borderColor: '#BFDBFE',
+  },
+  voicePlayBtnText: { fontSize: 13, fontWeight: '700', color: '#2563EB' },
+  voiceErrorText: { fontSize: 12, color: '#DC2626', marginBottom: 8, marginTop: -4 },
   recoveriesPerDayRow: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     backgroundColor: '#FFFFFF', borderRadius: 14, padding: 16,
