@@ -52,7 +52,7 @@
         "expo-image-picker",
         {
           "cameraPermission": "EasyFin Recovery uses the camera to capture the speedometer photo.",
-          "microphonePermission": false
+          "microphonePermission": "EasyFin Recovery uses the microphone to record visit voice notes."
         }
       ],
       [
