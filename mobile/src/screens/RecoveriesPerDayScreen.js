@@ -1,10 +1,67 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useRef, useCallback, useEffect } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
   TextInput, KeyboardAvoidingView, Platform, ActivityIndicator,
+  Modal, Image,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import { apiGet } from '../api';
+import { getCachedAudio } from '../utils/offlineStore';
+import { SpeedometerThumbnail } from './ProfileScreen';
+
+let activeDayVoiceCard = null; // { sessionId, stop() }
+
+const fmtVoiceDuration = (s) => {
+  if (s == null || isNaN(s)) return '';
+  const total = Math.max(0, Math.round(s));
+  const m = Math.floor(total / 60);
+  const sec = total % 60;
+  return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+};
+
+const fmtDuration = (s) => {
+  if (!s && s !== 0) return '-';
+  const sec = Math.max(0, Math.floor(s));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const pad = (n) => String(n).padStart(2, '0');
+  return (h > 0 ? `${h}h ` : '') + `${pad(m)}m`;
+};
+
+const fmtIdleTime = (s) => {
+  if (s == null) return '-';
+  const sec = Math.max(0, Math.floor(s));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const remSec = sec % 60;
+  if (h > 0) return `${h}h ${m}m ${remSec}s`;
+  if (m > 0) return `${m}m ${remSec}s`;
+  return `${remSec}s`;
+};
+
+const fmtDistance = (m) => {
+  if (!m && m !== 0) return '-';
+  return m < 1000 ? `${Math.round(m)} m` : `${(m / 1000).toFixed(2)} km`;
+};
+
+function InfoRow({ icon, label, value, wrapValue }) {
+  return (
+    <View style={[styles.infoRow, wrapValue && styles.infoRowWrap]}>
+      <View style={[styles.infoLabelGroup, wrapValue && { flexShrink: 0 }]}>
+        <Ionicons name={icon} size={13} color="#64748B" style={{ marginRight: 5 }} />
+        <Text style={styles.infoLabel}>{label}:</Text>
+      </View>
+      {wrapValue ? (
+        <View style={styles.infoValueWrapContainer}>
+          <Text style={styles.infoValueWrap} numberOfLines={2} ellipsizeMode="tail">{value || '-'}</Text>
+        </View>
+      ) : (
+        <Text style={styles.infoValue} numberOfLines={1}>{value || '-'}</Text>
+      )}
+    </View>
+  );
+}
 
 // ── Date helpers ────────────────────────────────────────────────────────────
 
@@ -78,22 +135,8 @@ function chipRange(chip) {
 
 // ── Main screen ───────────────────────────────────────────────────────────────
 
-/** Fetch signed voice URL and play it. Errors are handled quietly. */
-async function playVoiceNote(sessionId) {
-  try {
-    const res = await apiGet(`/recovery/sessions/${sessionId}/voice-url`);
-    const url = res?.url || res?.signedUrl || res?.voiceUrl;
-    if (!url) return;
-    const { AudioPlayer } = await import('expo-audio');
-    const player = new AudioPlayer(url);
-    player.play();
-  } catch (e) {
-    console.warn('[RecoveriesPerDay] Voice playback error:', e.message);
-  }
-}
-
 /** Compact session card for the per-day expanded list */
-function SessionMiniCard({ session }) {
+function SessionMiniCard({ session, onOpenPhoto }) {
   const hasMetField = session.customerMet != null;
   let visitedLabel = null;
   if (hasMetField) {
@@ -107,17 +150,100 @@ function SessionMiniCard({ session }) {
     }
   }
 
-  const hasVoice = !!(session.voicePath || session.voiceUri);
-  const sessionIdForVoice = session._id || session.sessionId;
-  const [voicePlaying, setVoicePlaying] = useState(false);
+  const startEvidenceId = session.startSpeedometerEvidenceId;
+  const startLocalUri = session.startPhotoUri;
+  const endEvidenceId = session.endSpeedometerEvidenceId;
+  const endLocalUri = session.endPhotoUri;
+  const hasStart = !!(startEvidenceId || startLocalUri);
+  const hasEnd = !!(endEvidenceId || endLocalUri);
+  const hasAnyPhoto = hasStart || hasEnd;
 
-  const handlePlayVoice = async () => {
-    if (!sessionIdForVoice) return;
-    setVoicePlaying(true);
+  const hasVoice = Boolean(session.voicePath || session.voiceUri);
+  const sessionIdForVoice = session.sessionId || session._id || session.deviceSessionId;
+  const [voicePlaying, setVoicePlaying] = useState(false);
+  const [voiceLoading, setVoiceLoading] = useState(false);
+  const [voiceError, setVoiceError] = useState(false);
+  const cardPlayerRef = useRef(null);
+
+  const stopVoicePlayback = useCallback(() => {
+    if (cardPlayerRef.current) {
+      try {
+        cardPlayerRef.current.pause();
+        cardPlayerRef.current.remove();
+      } catch (_) {}
+      cardPlayerRef.current = null;
+    }
+    setVoicePlaying(false);
+    setVoiceLoading(false);
+    if (activeDayVoiceCard && activeDayVoiceCard.sessionId === sessionIdForVoice) {
+      activeDayVoiceCard = null;
+    }
+  }, [sessionIdForVoice]);
+
+  useEffect(() => {
+    return () => {
+      stopVoicePlayback();
+    };
+  }, [stopVoicePlayback]);
+
+  const handleToggleVoice = async () => {
+    setVoiceError(false);
+    if (voicePlaying) {
+      stopVoicePlayback();
+      return;
+    }
+
+    if (activeDayVoiceCard && activeDayVoiceCard.sessionId !== sessionIdForVoice) {
+      try {
+        activeDayVoiceCard.stop();
+      } catch (_) {}
+    }
+    activeDayVoiceCard = { sessionId: sessionIdForVoice, stop: stopVoicePlayback };
+
+    setVoiceLoading(true);
     try {
-      await playVoiceNote(sessionIdForVoice);
+      let localAudioPath = null;
+      if (session.voiceUri && session.voiceUri.startsWith('file://')) {
+        localAudioPath = session.voiceUri;
+      } else if (sessionIdForVoice) {
+        localAudioPath = await getCachedAudio(sessionIdForVoice, async (id) => {
+          const res = await apiGet(`/recovery/sessions/${id}/voice-url`);
+          return res?.url || res?.signedUrl || res?.voiceUrl;
+        });
+      }
+
+      if (!localAudioPath) {
+        setVoiceError(true);
+        setVoiceLoading(false);
+        return;
+      }
+
+      await setAudioModeAsync({
+        allowsRecording: false,
+        playsInSilentMode: true,
+        shouldRouteThroughEarpiece: false,
+      });
+
+      if (cardPlayerRef.current) {
+        try {
+          cardPlayerRef.current.remove();
+        } catch (_) {}
+      }
+
+      const player = createAudioPlayer(localAudioPath);
+      cardPlayerRef.current = player;
+      player.addListener('playbackStatusUpdate', (status) => {
+        if (status.didJustFinish) {
+          setVoicePlaying(false);
+          player.seekTo(0).catch(() => {});
+        }
+      });
+      player.play();
+      setVoicePlaying(true);
+    } catch (_err) {
+      setVoiceError(true);
     } finally {
-      setVoicePlaying(false);
+      setVoiceLoading(false);
     }
   };
 
@@ -130,6 +256,11 @@ function SessionMiniCard({ session }) {
     return `${p(h)}:${p(x.getMinutes())} ${x.getHours() < 12 ? 'AM' : 'PM'}`;
   };
 
+  const startLoc = session.startLocation ? `${session.startLocation.latitude?.toFixed(4)}, ${session.startLocation.longitude?.toFixed(4)}` : null;
+  const endLoc = session.endLocation ? `${session.endLocation.latitude?.toFixed(4)}, ${session.endLocation.longitude?.toFixed(4)}` : null;
+  const displayStart = session.startAddress || startLoc;
+  const displayEnd = session.endAddress || endLoc;
+
   return (
     <View style={styles.miniCard}>
       <View style={styles.miniCardHeader}>
@@ -138,6 +269,8 @@ function SessionMiniCard({ session }) {
           <Text style={styles.miniCardMode}>{session.vehicleType}</Text>
         ) : null}
       </View>
+
+      {/* Visited / not visited outcome */}
       {visitedLabel ? (
         <View style={[styles.miniVisitedRow,
           { backgroundColor: session.customerMet === true || session.customerMet === 'true' ? '#F0FDF4' : '#FEF2F2' }
@@ -155,27 +288,89 @@ function SessionMiniCard({ session }) {
           </Text>
         </View>
       ) : null}
+
+      {/* Voice note row using cache */}
       {hasVoice && sessionIdForVoice ? (
-        <TouchableOpacity
-          style={styles.miniPlayVoiceBtn}
-          onPress={handlePlayVoice}
-          disabled={voicePlaying}
-          activeOpacity={0.7}
-        >
-          {voicePlaying ? (
-            <ActivityIndicator size="small" color="#2563EB" style={{ marginRight: 5 }} />
-          ) : (
-            <Ionicons name="play-circle-outline" size={14} color="#2563EB" style={{ marginRight: 5 }} />
-          )}
-          <Text style={styles.miniPlayVoiceText}>Play voice note</Text>
-        </TouchableOpacity>
+        <View style={styles.voiceNoteRow}>
+          <View style={styles.voiceNoteLeft}>
+            <Ionicons name="mic" size={15} color="#475569" style={{ marginRight: 5 }} />
+            <Text style={styles.voiceNoteLabel}>
+              Voice note{session.voiceDurationSeconds ? ` (${fmtVoiceDuration(session.voiceDurationSeconds)})` : ''}
+            </Text>
+          </View>
+          <TouchableOpacity
+            style={styles.voicePlayBtn}
+            onPress={handleToggleVoice}
+            disabled={voiceLoading}
+            activeOpacity={0.7}
+          >
+            {voiceLoading ? (
+              <ActivityIndicator size="small" color="#2563EB" />
+            ) : (
+              <>
+                <Ionicons
+                  name={voicePlaying ? 'pause-circle-outline' : 'play-circle-outline'}
+                  size={16}
+                  color="#2563EB"
+                  style={{ marginRight: 4 }}
+                />
+                <Text style={styles.voicePlayBtnText}>{voicePlaying ? 'Pause' : 'Play'}</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        </View>
       ) : null}
+      {voiceError ? (
+        <Text style={styles.voiceErrorText}>Could not play the recording.</Text>
+      ) : null}
+
+      {/* Speedometer thumbnails (signed URL, tap to enlarge) */}
+      {hasAnyPhoto ? (
+        <View style={styles.speedometerSection}>
+          <Text style={styles.speedometerSectionLabel}>Speedometer</Text>
+          <View style={styles.speedometerThumbnailsRow}>
+            {hasStart ? (
+              <SpeedometerThumbnail
+                label="Start"
+                evidenceId={startEvidenceId}
+                localUri={startLocalUri}
+                onOpen={(src) => onOpenPhoto && onOpenPhoto(src, 'Start Speedometer')}
+              />
+            ) : null}
+            {hasEnd ? (
+              <SpeedometerThumbnail
+                label="End"
+                evidenceId={endEvidenceId}
+                localUri={endLocalUri}
+                onOpen={(src) => onOpenPhoto && onOpenPhoto(src, 'End Speedometer')}
+              />
+            ) : null}
+          </View>
+        </View>
+      ) : null}
+
+      {/* Session metrics: idle time, duration, distance, locations, vehicle */}
+      <View style={styles.sessionInfoGrid}>
+        <InfoRow icon="hourglass-outline" label="Duration" value={fmtDuration(session.durationSeconds)} />
+        <InfoRow icon="pause-circle-outline" label="Idle Time" value={fmtIdleTime(session.idleSeconds)} />
+        <InfoRow icon="navigate-outline" label="Distance" value={fmtDistance(session.distanceMeters)} />
+        {session.vehicleNumber ? (
+          <InfoRow icon="car-outline" label="Vehicle Reg" value={session.vehicleNumber} />
+        ) : null}
+        {displayStart ? (
+          <InfoRow icon="location-outline" label="Start Loc" value={displayStart} wrapValue />
+        ) : null}
+        {displayEnd ? (
+          <InfoRow icon="flag-outline" label="End Loc" value={displayEnd} wrapValue />
+        ) : null}
+      </View>
     </View>
   );
 }
 
 export default function RecoveriesPerDayScreen({ route }) {
   const sessions = route?.params?.sessions || [];
+  const [modalImage, setModalImage] = useState(null);
 
   const [selectedChip, setSelectedChip] = useState('Last 7 days');
   const [fromText, setFromText] = useState(() => {
@@ -405,7 +600,11 @@ export default function RecoveriesPerDayScreen({ route }) {
                     {isExpanded ? (
                       <View style={[styles.sessionsList, idx < rows.length - 1 && styles.dayRowBorder]}>
                         {daySessions.map((s, si) => (
-                          <SessionMiniCard key={s._id || s.sessionId || si} session={s} />
+                          <SessionMiniCard
+                            key={s._id || s.sessionId || si}
+                            session={s}
+                            onOpenPhoto={(src, title) => setModalImage({ source: src, title })}
+                          />
                         ))}
                       </View>
                     ) : null}
@@ -421,6 +620,37 @@ export default function RecoveriesPerDayScreen({ route }) {
           </>
         )}
       </ScrollView>
+
+      {/* Full-size photo Modal */}
+      <Modal
+        visible={!!modalImage}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setModalImage(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>{modalImage?.title || 'Speedometer'}</Text>
+            <TouchableOpacity
+              style={styles.modalCloseBtn}
+              onPress={() => setModalImage(null)}
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="close" size={24} color="#FFFFFF" />
+            </TouchableOpacity>
+          </View>
+          <View style={styles.modalImageContainer}>
+            {modalImage ? (
+              <Image
+                source={modalImage.source}
+                style={styles.modalFullImage}
+                resizeMode="contain"
+              />
+            ) : null}
+          </View>
+        </View>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
@@ -480,23 +710,99 @@ const styles = StyleSheet.create({
   dayRowRight: { flexDirection: 'row', alignItems: 'center' },
   sessionsList: { paddingHorizontal: 12, paddingBottom: 10 },
   miniCard: {
-    backgroundColor: '#F8FAFC', borderRadius: 10, padding: 10,
-    marginBottom: 6, borderWidth: 1, borderColor: '#E2E8F0',
+    backgroundColor: '#F8FAFC', borderRadius: 12, padding: 12,
+    marginBottom: 8, borderWidth: 1, borderColor: '#E2E8F0',
   },
   miniCardHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
   miniCardTime: { fontSize: 12, fontWeight: '700', color: '#334155' },
   miniCardMode: { fontSize: 11, fontWeight: '700', color: '#64748B', textTransform: 'uppercase' },
   miniVisitedRow: {
     flexDirection: 'row', alignItems: 'center',
-    borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4, marginBottom: 6,
+    borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4, marginBottom: 8,
   },
   miniVisitedText: { fontSize: 12, fontWeight: '700' },
-  miniPlayVoiceBtn: {
-    flexDirection: 'row', alignItems: 'center',
-    backgroundColor: '#EFF6FF', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4,
-    borderWidth: 1, borderColor: '#BFDBFE', alignSelf: 'flex-start',
+
+  // Voice note row
+  voiceNoteRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    backgroundColor: '#FFFFFF', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 8,
+    borderWidth: 1, borderColor: '#E2E8F0', marginBottom: 8,
   },
-  miniPlayVoiceText: { fontSize: 12, fontWeight: '700', color: '#2563EB' },
+  voiceNoteLeft: { flexDirection: 'row', alignItems: 'center', flex: 1, marginRight: 6 },
+  voiceNoteLabel: { fontSize: 12, fontWeight: '600', color: '#334155' },
+  voicePlayBtn: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: '#EFF6FF', borderRadius: 6, paddingVertical: 4, paddingHorizontal: 10,
+    borderWidth: 1, borderColor: '#BFDBFE',
+  },
+  voicePlayBtnText: { fontSize: 12, fontWeight: '700', color: '#2563EB' },
+  voiceErrorText: { fontSize: 11, color: '#DC2626', marginBottom: 6, marginTop: -2 },
+
+  // Speedometer section in miniCard
+  speedometerSection: {
+    marginTop: 4,
+    marginBottom: 8,
+    paddingTop: 6,
+    borderTopWidth: 1,
+    borderTopColor: '#E2E8F0',
+  },
+  speedometerSectionLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#64748B',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 6,
+  },
+  speedometerThumbnailsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+
+  // Info grid & rows
+  sessionInfoGrid: { gap: 4, marginTop: 4 },
+  infoRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  infoRowWrap: { alignItems: 'flex-start' },
+  infoLabelGroup: { flexDirection: 'row', alignItems: 'center' },
+  infoLabel: { fontSize: 11, color: '#64748B', fontWeight: '500' },
+  infoValue: { fontSize: 11, fontWeight: '600', color: '#0F172A' },
+  infoValueWrapContainer: { flex: 1, minWidth: 0, alignItems: 'flex-end', marginLeft: 6 },
+  infoValueWrap: { fontSize: 11, fontWeight: '600', color: '#0F172A', textAlign: 'right' },
+
+  // Modal
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.94)',
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingTop: Platform.OS === 'ios' ? 56 : 24,
+    paddingBottom: 12,
+  },
+  modalTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+  modalCloseBtn: {
+    padding: 6,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.18)',
+  },
+  modalImageContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 16,
+  },
+  modalFullImage: {
+    width: '100%',
+    height: '100%',
+  },
 
   // Total row
   totalRow: {

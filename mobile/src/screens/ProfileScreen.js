@@ -11,7 +11,7 @@ import { createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import { apiGet } from '../api';
 import { API_URL } from '../config';
 import { BADGE_COLORS } from '../utils/nlpSummarizer';
-import { cacheHistory, getCachedHistory, getPendingSessions, syncPendingSessions } from '../utils/offlineStore';
+import { cacheHistory, getCachedHistory, getPendingSessions, syncPendingSessions, getCachedAudio } from '../utils/offlineStore';
 
 let activeProfileVoiceCard = null; // { sessionId, stop() }
 
@@ -100,7 +100,7 @@ function InfoRow({ icon, label, value, wrapValue }) {
 const evidenceSourceCache = new Map();
 const evidenceInFlightCache = new Map();
 
-async function resolveEvidenceSource(evidenceId, forceFresh = false) {
+export async function resolveEvidenceSource(evidenceId, forceFresh = false) {
   if (!evidenceId) return null;
   const now = Date.now();
   if (!forceFresh && evidenceSourceCache.has(evidenceId)) {
@@ -147,7 +147,7 @@ async function resolveEvidenceSource(evidenceId, forceFresh = false) {
   return promise;
 }
 
-function SpeedometerThumbnail({ label, evidenceId, localUri, onOpen }) {
+export function SpeedometerThumbnail({ label, evidenceId, localUri, onOpen }) {
   const [source, setSource] = useState(() => {
     if (localUri) return { uri: localUri };
     if (evidenceId && evidenceSourceCache.has(evidenceId)) {
@@ -357,14 +357,17 @@ function SessionCard({ session }) {
 
     setVoiceLoading(true);
     try {
-      let voiceUrl = session.voiceUri;
-      if (!voiceUrl && sessionIdForVoice) {
-        // ALWAYS request a fresh link, never cached
-        const res = await apiGet(`/recovery/sessions/${sessionIdForVoice}/voice-url`);
-        voiceUrl = res?.url || res?.signedUrl || res?.voiceUrl;
+      let localAudioPath = null;
+      if (session.voiceUri && session.voiceUri.startsWith('file://')) {
+        localAudioPath = session.voiceUri;
+      } else if (sessionIdForVoice) {
+        localAudioPath = await getCachedAudio(sessionIdForVoice, async (id) => {
+          const res = await apiGet(`/recovery/sessions/${id}/voice-url`);
+          return res?.url || res?.signedUrl || res?.voiceUrl;
+        });
       }
 
-      if (!voiceUrl) {
+      if (!localAudioPath) {
         setVoiceError(true);
         setVoiceLoading(false);
         return;
@@ -382,7 +385,7 @@ function SessionCard({ session }) {
         } catch (_) {}
       }
 
-      const player = createAudioPlayer(voiceUrl);
+      const player = createAudioPlayer(localAudioPath);
       cardPlayerRef.current = player;
       player.addListener('playbackStatusUpdate', (status) => {
         if (status.didJustFinish) {

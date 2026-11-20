@@ -8,7 +8,125 @@
  */
 import * as SecureStore from 'expo-secure-store';
 import * as Location from 'expo-location';
-import { apiPost, apiUploadFile, apiUploadFiles } from '../api';
+import { File, Directory, Paths } from 'expo-file-system';
+import { downloadAsync } from 'expo-file-system/legacy';
+import { apiGet, apiPost, apiUploadFile, apiUploadFiles, toFileUri } from '../api';
+
+const MAX_AUDIO_CACHE_BYTES = 50 * 1024 * 1024; // 50 MB
+
+/**
+ * Prune audio cache in <cacheDirectory>voice/ to keep it under 50 MB
+ * by deleting the oldest files first.
+ */
+export async function pruneAudioCache() {
+  try {
+    const voiceDir = new Directory(Paths.cache, 'voice');
+    if (!voiceDir.exists) return;
+    const items = typeof voiceDir.list === 'function' ? voiceDir.list() : [];
+    const files = [];
+    let totalBytes = 0;
+    for (const item of items) {
+      try {
+        if (item && item.exists) {
+          const size = typeof item.size === 'number' ? item.size : 0;
+          const time = item.lastModified || item.modificationTime || item.creationTime || 0;
+          files.push({ file: item, size, time });
+          totalBytes += size;
+        }
+      } catch (_) {}
+    }
+    if (totalBytes > MAX_AUDIO_CACHE_BYTES) {
+      // Sort ascending by time (oldest first)
+      files.sort((a, b) => a.time - b.time);
+      for (const entry of files) {
+        if (totalBytes <= MAX_AUDIO_CACHE_BYTES) break;
+        try {
+          entry.file.delete();
+          totalBytes -= entry.size;
+        } catch (_) {}
+      }
+    }
+  } catch (e) {
+    console.warn('[offlineStore] pruneAudioCache error:', e.message);
+  }
+}
+
+/**
+ * Copies a local recording to <cacheDirectory>voice/<sessionId>.m4a after successful upload.
+ * Prunes cache to keep total under 50 MB.
+ */
+export async function copyRecordingToCache(sessionId, localUri) {
+  if (!sessionId || !localUri) return null;
+  const normalized = toFileUri(localUri);
+  if (!normalized) return null;
+  try {
+    const voiceDir = new Directory(Paths.cache, 'voice');
+    if (!voiceDir.exists) {
+      try {
+        voiceDir.create({ intermediates: true });
+      } catch (_) {}
+    }
+    const targetFile = new File(voiceDir, `${sessionId}.m4a`);
+    const srcFile = new File(normalized);
+    if (srcFile.exists) {
+      if (targetFile.exists) {
+        try {
+          targetFile.delete();
+        } catch (_) {}
+      }
+      await srcFile.copy(targetFile);
+      await pruneAudioCache();
+      return toFileUri(targetFile.uri);
+    }
+  } catch (e) {
+    console.warn('[offlineStore] copyRecordingToCache error:', e.message);
+  }
+  return null;
+}
+
+/**
+ * Returns the cached local audio path for a session:
+ * if <cacheDirectory>voice/<sessionId>.m4a exists, return it;
+ * otherwise fetch the signed URL from /recovery/sessions/:id/voice-url,
+ * download to that path, and return it.
+ */
+export async function getCachedAudio(sessionId, signedUrlFetcher) {
+  if (!sessionId) return null;
+  try {
+    const voiceDir = new Directory(Paths.cache, 'voice');
+    if (!voiceDir.exists) {
+      try {
+        voiceDir.create({ intermediates: true });
+      } catch (_) {}
+    }
+
+    const targetFile = new File(voiceDir, `${sessionId}.m4a`);
+    if (targetFile.exists) {
+      return toFileUri(targetFile.uri);
+    }
+
+    let signedUrl = null;
+    if (typeof signedUrlFetcher === 'function') {
+      const res = await signedUrlFetcher(sessionId);
+      signedUrl = typeof res === 'string' ? res : (res?.url || res?.signedUrl || res?.voiceUrl);
+    } else {
+      const res = await apiGet(`/recovery/sessions/${sessionId}/voice-url`);
+      signedUrl = res?.url || res?.signedUrl || res?.voiceUrl;
+    }
+
+    if (!signedUrl) {
+      return null;
+    }
+
+    await downloadAsync(signedUrl, targetFile.uri);
+    await pruneAudioCache();
+
+    return toFileUri(targetFile.uri);
+  } catch (e) {
+    console.warn('[offlineStore] getCachedAudio error:', e.message);
+    return null;
+  }
+}
 
 async function getReadableAddress(p) {
   if (!p || typeof p.latitude !== 'number' || typeof p.longitude !== 'number') return '';
@@ -196,18 +314,24 @@ export async function syncPendingSessions() {
 
             if (session.voiceUri) {
               // Include voice in the same multipart upload; never delete locally until confirmed
-              const onlineFilesMap = { endPhoto: session.endPhotoUri, voice: session.voiceUri };
+              const onlineFilesMap = {
+                endPhoto: toFileUri(session.endPhotoUri),
+                voice: toFileUri(session.voiceUri),
+              };
               await apiUploadFiles(
                 `/recovery/sessions/${session.sessionId}/finish`,
                 onlineFinishMeta,
                 onlineFilesMap
               );
+              try {
+                await copyRecordingToCache(session.sessionId, session.voiceUri);
+              } catch (_) {}
             } else {
               await apiUploadFile(
                 `/recovery/sessions/${session.sessionId}/finish`,
                 onlineFinishMeta,
                 'endPhoto',
-                session.endPhotoUri
+                toFileUri(session.endPhotoUri)
               );
             }
 
@@ -274,11 +398,16 @@ export async function syncPendingSessions() {
             '/recovery/sync',
             bikeCarSyncMeta,
             {
-              startPhoto: session.startPhotoUri,
-              endPhoto: session.endPhotoUri,
-              ...(session.voiceUri ? { voice: session.voiceUri } : {}),
+              startPhoto: toFileUri(session.startPhotoUri),
+              endPhoto: toFileUri(session.endPhotoUri),
+              ...(session.voiceUri ? { voice: toFileUri(session.voiceUri) } : {}),
             }
           );
+          if (session.voiceUri) {
+            try {
+              await copyRecordingToCache(session.sessionId || session.deviceSessionId, session.voiceUri);
+            } catch (_) {}
+          }
 
           console.log('[offlineStore] Confirmed sync for full offline Bike/Car session:', session.deviceSessionId);
           synced++;
@@ -306,7 +435,10 @@ export async function syncPendingSessions() {
               voiceDurationSeconds: String(session.voiceDurationSeconds || 0),
               startLocation: JSON.stringify(session.startLocation || null),
               endLocation: JSON.stringify(session.endLocation || null),
-            }, { voice: session.voiceUri });
+            }, { voice: toFileUri(session.voiceUri) });
+            try {
+              await copyRecordingToCache(session.sessionId || session.deviceSessionId, session.voiceUri);
+            } catch (_) {}
           } else {
             const walkSyncPayload = {
               ...session,

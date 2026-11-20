@@ -9,9 +9,9 @@ import * as Location from 'expo-location';
 import { Ionicons } from '@expo/vector-icons';
 import { useAudioRecorder, AudioModule, createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import { File, Paths } from 'expo-file-system';
-import { apiUploadFile, apiPost, apiUploadFiles, apiGet } from '../api';
+import { apiUploadFile, apiPost, apiUploadFiles, apiGet, toFileUri } from '../api';
 import { formatDistance, formatDuration } from '../utils/geo';
-import { savePendingSession } from '../utils/offlineStore';
+import { savePendingSession, copyRecordingToCache } from '../utils/offlineStore';
 import { checkHasNumbers } from '../utils/speedometerCheck';
 
 if (!Object.prototype.hasOwnProperty.call(File.prototype, 'type')) {
@@ -206,17 +206,20 @@ function VoiceRecorder({ onRecorded, onCleared }) {
       });
 
       // Save as voice.m4a with explicit audio/mp4 type in cache
-      let finalUri = uri;
-      try {
-        const src = new File(uri);
-        const target = new File(Paths.cache, 'voice.m4a');
-        if (target.exists) {
-          try { target.delete(); } catch (_) {}
+      const normalizedUri = toFileUri(uri);
+      let finalUri = normalizedUri;
+      if (normalizedUri) {
+        try {
+          const src = new File(normalizedUri);
+          const target = new File(Paths.cache, 'voice.m4a');
+          if (target.exists) {
+            try { target.delete(); } catch (_) {}
+          }
+          await src.copy(target);
+          finalUri = toFileUri(target.uri) || target.uri;
+        } catch (_) {
+          finalUri = normalizedUri;
         }
-        await src.copy(target);
-        finalUri = target.uri;
-      } catch (_) {
-        finalUri = uri;
       }
 
       const dur = elapsed;
@@ -248,7 +251,8 @@ function VoiceRecorder({ onRecorded, onCleared }) {
   };
 
   const playRecording = async () => {
-    if (!recordedUri) return;
+    const localUri = toFileUri(recordedUri);
+    if (!localUri) return;
     if (playerState === 'playing') {
       // pause playback
       if (playerRef.current) {
@@ -273,7 +277,7 @@ function VoiceRecorder({ onRecorded, onCleared }) {
         playerRef.current = null;
       }
 
-      const player = createAudioPlayer(recordedUri);
+      const player = createAudioPlayer(localUri);
       playerRef.current = player;
       player.addListener('playbackStatusUpdate', (status) => {
         if (status.didJustFinish) {
@@ -489,7 +493,7 @@ export default function CompleteScreen({ route, navigation }) {
       allowsEditing: false,
     });
     if (!r.canceled && r.assets && r.assets[0] && r.assets[0].uri) {
-      const capturedUri = r.assets[0].uri;
+      const capturedUri = toFileUri(r.assets[0].uri);
       setCheckingPhoto(true);
       setSpeedometerCheckError('');
       try {
@@ -527,7 +531,8 @@ export default function CompleteScreen({ route, navigation }) {
 
   const useAnyway = () => {
     if (lastSpeedometerPhoto) {
-      setPhoto(lastSpeedometerPhoto);
+      const resolved = toFileUri(lastSpeedometerPhoto);
+      setPhoto(resolved);
       setSpeedometerCheckError('');
       setSpeedometerFailedTries(0);
       setLastSpeedometerPhoto(null);
@@ -554,7 +559,7 @@ export default function CompleteScreen({ route, navigation }) {
   const canEndRecovery = (() => {
     if (submitting) return false;
     if (customerMet === null) return false;
-    if (needsEndPhoto && !photo) return false;
+    if (needsEndPhoto && !toFileUri(photo)) return false;
 
     if (customerMet === true) {
       // At least one non-empty name required
@@ -565,7 +570,7 @@ export default function CompleteScreen({ route, navigation }) {
 
     if (customerMet === false) {
       // Voice note OR typed reason required
-      if (notMetVoiceUri) return true;
+      if (toFileUri(notMetVoiceUri)) return true;
       if (notMetReason.trim()) return true;
       return false;
     }
@@ -587,7 +592,8 @@ export default function CompleteScreen({ route, navigation }) {
       Alert.alert('Required', 'Please select Visited or Not visited.');
       return;
     }
-    if (needsEndPhoto && !photo) {
+    const finalPhoto = toFileUri(photo);
+    if (needsEndPhoto && !finalPhoto) {
       Alert.alert('Ending Photo Required', 'Please capture the ending speedometer image.');
       return;
     }
@@ -598,11 +604,21 @@ export default function CompleteScreen({ route, navigation }) {
         return;
       }
     }
+    const rawVoiceUri = customerMet ? voiceUri : notMetVoiceUri;
+    const activeVoiceUri = toFileUri(rawVoiceUri);
+    const activeVoiceDuration = customerMet ? voiceDuration : notMetVoiceDuration;
+
     if (customerMet === false) {
-      if (!notMetVoiceUri && !notMetReason.trim()) {
-        Alert.alert('Required', 'Please record a voice note or type a reason.');
-        return;
+      if (!notMetReason.trim()) {
+        if (!activeVoiceUri) {
+          Alert.alert('Recording not found', 'Recording not found, please record again');
+          return;
+        }
       }
+    }
+    if (customerMet === true && rawVoiceUri != null && !activeVoiceUri) {
+      Alert.alert('Recording not found', 'Recording not found, please record again');
+      return;
     }
 
     setSubmitting(true);
@@ -626,8 +642,6 @@ export default function CompleteScreen({ route, navigation }) {
     eAddr = eAddr || '';
 
     const customerNames = customerMet ? visitedNames.filter((n) => n.trim()).map((n) => n.trim()) : [];
-    const activeVoiceUri = customerMet ? voiceUri : notMetVoiceUri;
-    const activeVoiceDuration = customerMet ? voiceDuration : notMetVoiceDuration;
 
     // Build base remarks string for NLP (keep legacy field for backend compat)
     const remarksText = customerMet
@@ -688,7 +702,7 @@ export default function CompleteScreen({ route, navigation }) {
         };
 
         const filesMap = {};
-        if (photo) filesMap.endPhoto = photo;
+        if (finalPhoto) filesMap.endPhoto = finalPhoto;
         if (activeVoiceUri) filesMap.voice = activeVoiceUri;
 
         const endpoint = needsEndPhoto
@@ -696,6 +710,12 @@ export default function CompleteScreen({ route, navigation }) {
           : `/recovery/sessions/${sessionId}/finish-walk`;
 
         await apiUploadFiles(endpoint, fields, filesMap);
+      }
+
+      if (activeVoiceUri && sessionId) {
+        try {
+          await copyRecordingToCache(sessionId, activeVoiceUri);
+        } catch (_) {}
       }
 
       handleFinishSuccess();
@@ -709,6 +729,7 @@ export default function CompleteScreen({ route, navigation }) {
       if (isNetworkError(e)) {
         // Save offline, sync later
         try {
+          const finalStartPhoto = toFileUri(startPhotoUri || session?.startPhotoUri);
           await savePendingSession({
             deviceSessionId: session?.deviceSessionId || sessionId,
             sessionId: session?.sessionId || sessionId,
@@ -737,8 +758,8 @@ export default function CompleteScreen({ route, navigation }) {
             nlpDetails: '',
             startLocation: startLocation || session?.startLocation || null,
             endLocation: end || null,
-            startPhotoUri: startPhotoUri || session?.startPhotoUri || null,
-            endPhotoUri: needsEndPhoto ? (photo || null) : null,
+            startPhotoUri: finalStartPhoto || null,
+            endPhotoUri: needsEndPhoto ? (finalPhoto || null) : null,
             voiceUri: activeVoiceUri || null,
             voiceDurationSeconds: activeVoiceUri ? activeVoiceDuration : null,
             customerMet,
