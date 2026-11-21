@@ -279,7 +279,8 @@ exports.getCompletedTasks = async (req, res) => {
             ? `/api/v1/recovery/evidence/${t.endSpeedometerEvidenceId}/image`
             : '',
           outcome: t.outcome || 'COMPLETED',
-          visitNotes: t.visitNotes || ''
+          visitNotes: t.visitNotes || '',
+          visitRemarks: t.visitNotes || ''
         };
       })
     );
@@ -652,7 +653,7 @@ exports.completeTask = async (req, res) => {
       startSpeedometerEvidenceId: session.startSpeedometerEvidenceId || '',
       endSpeedometerEvidenceId: session.endSpeedometerEvidenceId || '',
       outcome: session.outcome || session.nlpCategory || 'COMPLETED',
-      visitNotes: session.visitNotes || session.remarks || ''
+      visitNotes: session.visitRemarks || session.visitNotes || session.remarks || ''
     });
 
     // 5. Update Customer recoveryStatus to COMPLETED and release lock

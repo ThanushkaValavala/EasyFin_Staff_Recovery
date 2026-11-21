@@ -50,7 +50,11 @@ const parseCustomerMetBlock = (body, hasVoice = false) => {
   }
 
   // notMetReason: trimmed, max 300 chars
-  const notMetReason = String(body.notMetReason || '').trim().slice(0, 300);
+  let notMetReason = String(body.notMetReason || '').trim().slice(0, 300);
+  const visitRemarks = String(body.visitRemarks || '').trim().slice(0, 300);
+  if (!notMetReason && visitRemarks) {
+    notMetReason = visitRemarks;
+  }
 
   // Business rules
   if (customerMet === true && customerNames.length === 0) {
@@ -495,6 +499,7 @@ exports.finishSession = async (req, res) => {
     const endTime = new Date();
     session.endTime = endTime;
     session.status = 'COMPLETED';
+    session.visitRemarks = String(req.body.visitRemarks || '').trim().slice(0, 300);
 
     if (cmBlock.ok === true) {
       session.customerMet = cmBlock.customerMet;
@@ -631,6 +636,7 @@ exports.finishSessionWalk = async (req, res) => {
     const endTime = new Date();
     session.endTime = endTime;
     session.status = 'COMPLETED';
+    session.visitRemarks = String(req.body.visitRemarks || '').trim().slice(0, 300);
 
     if (cmBlock.ok === true) {
       session.customerMet = cmBlock.customerMet;
@@ -808,6 +814,7 @@ exports.syncOfflineSession = async (req, res) => {
 
       existing.endTime = body.endTime ? new Date(body.endTime) : new Date();
       existing.status = 'COMPLETED';
+      existing.visitRemarks = String(body.visitRemarks || existing.visitRemarks || '').trim().slice(0, 300);
 
       if (cmBlock1.ok === true) {
         existing.customerMet = cmBlock1.customerMet;
@@ -979,6 +986,7 @@ exports.syncOfflineSession = async (req, res) => {
       }
     }
 
+    const visitRemarks = String(body.visitRemarks || '').trim().slice(0, 300);
     let createPayload;
     if (cmBlock2.ok === true) {
       createPayload = {
@@ -986,6 +994,7 @@ exports.syncOfflineSession = async (req, res) => {
         customerNames: cmBlock2.customerNames,
         metAt: cmBlock2.metAt,
         notMetReason: cmBlock2.notMetReason,
+        visitRemarks,
       };
     } else {
       let nlpSummary, nlpCategory, nlpDetails;
@@ -1002,6 +1011,7 @@ exports.syncOfflineSession = async (req, res) => {
         nlpSummary,
         nlpCategory,
         nlpDetails,
+        visitRemarks,
       };
     }
 

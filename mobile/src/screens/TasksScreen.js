@@ -11,6 +11,7 @@ import { createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import { apiGet, apiPost } from '../api';
 import { API_URL } from '../config';
 import { getCachedAudio } from '../utils/offlineStore';
+import { VOICE_NOTES_ENABLED } from '../config/features';
 
 let activeTasksVoicePlayer = null;
 
@@ -753,7 +754,7 @@ export default function TasksScreen({ navigation }) {
                       </View>
 
                       {/* Voice Note Audio Playback */}
-                      {(task.voiceNoteUrl || task.voiceStoragePath) && (
+                      {VOICE_NOTES_ENABLED && (task.voiceNoteUrl || task.voiceStoragePath) && (
                         <View style={styles.voicePlayerBox}>
                           <TouchableOpacity
                             style={styles.voicePlayBtn}
@@ -890,10 +891,12 @@ export default function TasksScreen({ navigation }) {
                   <Text style={styles.detailRowLabel}>Outcome:</Text>
                   <Text style={styles.detailRowVal}>{selectedCompletedDetail.outcome}</Text>
                 </View>
-                {selectedCompletedDetail.visitNotes ? (
+                {(selectedCompletedDetail.visitRemarks || selectedCompletedDetail.visitNotes) ? (
                   <View style={[styles.detailRowItem, { flexDirection: 'column', alignItems: 'flex-start' }]}>
-                    <Text style={styles.detailRowLabel}>Visit Notes:</Text>
-                    <Text style={[styles.detailRowVal, { marginTop: 4 }]}>{selectedCompletedDetail.visitNotes}</Text>
+                    <Text style={styles.detailRowLabel}>Remarks:</Text>
+                    <Text style={[styles.detailRowVal, { marginTop: 4 }]}>
+                      {selectedCompletedDetail.visitRemarks || selectedCompletedDetail.visitNotes}
+                    </Text>
                   </View>
                 ) : null}
               </View>

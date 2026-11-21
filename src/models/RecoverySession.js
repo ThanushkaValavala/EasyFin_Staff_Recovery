@@ -79,7 +79,8 @@ const recoverySessionSchema = new mongoose.Schema(
     plannedPersonCount: { type: Number },
     plannedNames: [{ type: String }],
     voicePath: { type: String, default: '' },
-    voiceDurationSeconds: { type: Number }
+    voiceDurationSeconds: { type: Number },
+    visitRemarks: { type: String, default: '' }
   },
   { timestamps: true }
 );

@@ -13,6 +13,7 @@ import { apiUploadFile, apiPost, apiUploadFiles, apiGet, toFileUri } from '../ap
 import { formatDistance, formatDuration } from '../utils/geo';
 import { savePendingSession, copyRecordingToCache } from '../utils/offlineStore';
 import { checkHasNumbers } from '../utils/speedometerCheck';
+import { VOICE_NOTES_ENABLED } from '../config/features';
 
 if (!Object.prototype.hasOwnProperty.call(File.prototype, 'type')) {
   Object.defineProperty(File.prototype, 'type', {
@@ -453,6 +454,7 @@ export default function CompleteScreen({ route, navigation }) {
   const [notMetVoiceDuration, setNotMetVoiceDuration] = useState(0);
   const [showTypedReason, setShowTypedReason] = useState(false);
   const [notMetReason, setNotMetReason] = useState('');
+  const [visitRemarks, setVisitRemarks] = useState('');
   const [metAt, setMetAt] = useState('');
 
   useEffect(() => {
@@ -556,27 +558,33 @@ export default function CompleteScreen({ route, navigation }) {
   };
 
   // ── Validation ────────────────────────────────────────────────────────────
-  const canEndRecovery = (() => {
-    if (submitting) return false;
-    if (customerMet === null) return false;
-    if (needsEndPhoto && !toFileUri(photo)) return false;
+  const trimmedRemarks = visitRemarks.trim();
+  const hasValidNames = customerMet === true && visitedNames.some((n) => n.trim().length > 0);
+  const hasEndPhoto = !needsEndPhoto || Boolean(toFileUri(photo));
+  const photoCheckIdle = !checkingPhoto;
+  const optionChosen = customerMet !== null;
+  const remarksValid = trimmedRemarks.length > 0;
 
-    if (customerMet === true) {
-      // At least one non-empty name required
-      const filled = visitedNames.filter((n) => n.trim()).length;
-      if (filled === 0) return false;
-      return true;
+  const canEndRecovery = (
+    !submitting &&
+    photoCheckIdle &&
+    hasEndPhoto &&
+    optionChosen &&
+    (customerMet === true ? hasValidNames : true) &&
+    remarksValid
+  );
+
+  const getMissingValidationText = () => {
+    if (submitting) return '';
+    if (checkingPhoto) return 'Checking speedometer photo...';
+    if (needsEndPhoto && !toFileUri(photo)) return 'Capture ending speedometer photo to proceed';
+    if (customerMet === null) return 'Select Visited or Not visited to proceed';
+    if (customerMet === true && !visitedNames.some((n) => n.trim().length > 0)) {
+      return 'Enter at least one name to proceed';
     }
-
-    if (customerMet === false) {
-      // Voice note OR typed reason required
-      if (toFileUri(notMetVoiceUri)) return true;
-      if (notMetReason.trim()) return true;
-      return false;
-    }
-
-    return false;
-  })();
+    if (!trimmedRemarks) return 'Add remarks to continue';
+    return '';
+  };
 
   const handleFinishSuccess = () => {
     done.current = true;
@@ -604,21 +612,27 @@ export default function CompleteScreen({ route, navigation }) {
         return;
       }
     }
-    const rawVoiceUri = customerMet ? voiceUri : notMetVoiceUri;
+    if (!visitRemarks.trim()) {
+      Alert.alert('Remarks Required', 'Please enter visit remarks.');
+      return;
+    }
+    const rawVoiceUri = VOICE_NOTES_ENABLED ? (customerMet ? voiceUri : notMetVoiceUri) : null;
     const activeVoiceUri = toFileUri(rawVoiceUri);
-    const activeVoiceDuration = customerMet ? voiceDuration : notMetVoiceDuration;
+    const activeVoiceDuration = VOICE_NOTES_ENABLED ? (customerMet ? voiceDuration : notMetVoiceDuration) : 0;
 
-    if (customerMet === false) {
-      if (!notMetReason.trim()) {
-        if (!activeVoiceUri) {
-          Alert.alert('Recording not found', 'Recording not found, please record again');
-          return;
+    if (VOICE_NOTES_ENABLED) {
+      if (customerMet === false) {
+        if (!visitRemarks.trim() && !notMetReason.trim()) {
+          if (!activeVoiceUri) {
+            Alert.alert('Recording not found', 'Recording not found, please record again');
+            return;
+          }
         }
       }
-    }
-    if (customerMet === true && rawVoiceUri != null && !activeVoiceUri) {
-      Alert.alert('Recording not found', 'Recording not found, please record again');
-      return;
+      if (customerMet === true && rawVoiceUri != null && !activeVoiceUri) {
+        Alert.alert('Recording not found', 'Recording not found, please record again');
+        return;
+      }
     }
 
     setSubmitting(true);
@@ -642,11 +656,13 @@ export default function CompleteScreen({ route, navigation }) {
     eAddr = eAddr || '';
 
     const customerNames = customerMet ? visitedNames.filter((n) => n.trim()).map((n) => n.trim()) : [];
+    const finalRemarks = visitRemarks.trim().slice(0, 300);
+    const finalNotMetReason = customerMet === false ? finalRemarks : null;
 
     // Build base remarks string for NLP (keep legacy field for backend compat)
-    const remarksText = customerMet
+    const remarksText = finalRemarks || (customerMet
       ? (customerNames.length > 0 ? `Visited: ${customerNames.join(', ')}` : 'Visited customer')
-      : (notMetReason.trim() || 'Not visited customer');
+      : (finalNotMetReason || 'Not visited customer'));
 
     try {
       let nlpDetailsStr = '';
@@ -659,10 +675,11 @@ export default function CompleteScreen({ route, navigation }) {
         // WALK / OTHER without voice: JSON finish endpoint
         await apiPost(`/recovery/sessions/${sessionId}/finish-walk`, {
           remarks: remarksText,
+          visitRemarks: finalRemarks,
           customerMet,
           customerNames,
           metAt: metAt.trim() || null,
-          notMetReason: customerMet ? undefined : (notMetReason.trim() || null),
+          notMetReason: customerMet ? undefined : (finalNotMetReason || null),
           distanceMeters: Math.round(dist || 0),
           durationSeconds: Math.round(durationSeconds || 0),
           movingSeconds: movingSeconds != null ? Math.round(movingSeconds) : null,
@@ -683,10 +700,11 @@ export default function CompleteScreen({ route, navigation }) {
           customerId: route.params?.customerId || session?.customerRefId || '',
           customerRefId: route.params?.customerId || session?.customerRefId || '',
           remarks: remarksText,
+          visitRemarks: finalRemarks,
           customerMet: String(customerMet),
           customerNames: JSON.stringify(customerNames),
           metAt: metAt.trim() || '',
-          notMetReason: customerMet ? '' : (notMetReason.trim() || ''),
+          notMetReason: customerMet ? '' : (finalNotMetReason || ''),
           distanceMeters: String(Math.round(dist || 0)),
           durationSeconds: String(Math.round(durationSeconds || 0)),
           movingSeconds: movingSeconds != null ? String(Math.round(movingSeconds)) : '',
@@ -755,6 +773,7 @@ export default function CompleteScreen({ route, navigation }) {
             endAddress: eAddr,
             remarks: remarksText,
             rawRemarks: remarksText,
+            visitRemarks: finalRemarks,
             nlpSummary: '',
             nlpCategory: '',
             nlpDetails: '',
@@ -767,7 +786,7 @@ export default function CompleteScreen({ route, navigation }) {
             customerMet,
             customerNames,
             metAt: metAt.trim() || null,
-            notMetReason: customerMet ? null : (notMetReason.trim() || null),
+            notMetReason: customerMet ? null : (finalNotMetReason || null),
             points: allPoints || [],
             _syncStatus: 'PENDING',
           });
@@ -979,20 +998,38 @@ export default function CompleteScreen({ route, navigation }) {
                 </TouchableOpacity>
               ) : null}
 
-              <Text style={[styles.subLabel, { marginTop: 14 }]}>Voice note (optional)</Text>
-              <VoiceRecorder
-                onRecorded={(uri, dur) => { setVoiceUri(uri); setVoiceDuration(dur); }}
-                onCleared={() => { setVoiceUri(null); setVoiceDuration(0); }}
+              <Text style={[styles.subLabel, { marginTop: 14 }]}>Add remarks *</Text>
+              <TextInput
+                style={styles.textArea}
+                placeholder="Enter visit remarks..."
+                placeholderTextColor="#94A3B8"
+                multiline
+                numberOfLines={4}
+                maxLength={300}
+                value={visitRemarks}
+                onChangeText={setVisitRemarks}
+                textAlignVertical="top"
               />
+              <Text style={styles.charCounter}>{visitRemarks.length} / 300 characters</Text>
+
+              {VOICE_NOTES_ENABLED ? (
+                <>
+                  <Text style={[styles.subLabel, { marginTop: 14 }]}>Voice note (optional)</Text>
+                  <VoiceRecorder
+                    onRecorded={(uri, dur) => { setVoiceUri(uri); setVoiceDuration(dur); }}
+                    onCleared={() => { setVoiceUri(null); setVoiceDuration(0); }}
+                  />
+                </>
+              ) : null}
             </View>
           ) : null}
 
-          {/* ── NOT VISITED: Voice or typed reason ─────────────────────────── */}
+          {/* ── NOT VISITED: Remarks box (or voice toggle if enabled) ──────── */}
           {customerMet === false ? (
             <View style={styles.outcomeSub}>
-              <Text style={styles.subLabel}>Reason for not visiting *</Text>
-              {!showTypedReason ? (
+              {VOICE_NOTES_ENABLED && !showTypedReason ? (
                 <>
+                  <Text style={styles.subLabel}>Reason for not visiting *</Text>
                   <VoiceRecorder
                     onRecorded={(uri, dur) => { setNotMetVoiceUri(uri); setNotMetVoiceDuration(dur); }}
                     onCleared={() => { setNotMetVoiceUri(null); setNotMetVoiceDuration(0); }}
@@ -1007,23 +1044,28 @@ export default function CompleteScreen({ route, navigation }) {
                 </>
               ) : (
                 <>
+                  <Text style={styles.subLabel}>Add remarks *</Text>
                   <TextInput
                     style={styles.textArea}
                     placeholder="Enter reason for not visiting..."
                     placeholderTextColor="#94A3B8"
                     multiline
                     numberOfLines={4}
-                    value={notMetReason}
-                    onChangeText={setNotMetReason}
+                    maxLength={300}
+                    value={visitRemarks}
+                    onChangeText={setVisitRemarks}
                     textAlignVertical="top"
                   />
-                  <TouchableOpacity
-                    style={styles.typeInsteadLink}
-                    onPress={() => setShowTypedReason(false)}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={styles.typeInsteadText}>Record voice note instead</Text>
-                  </TouchableOpacity>
+                  <Text style={styles.charCounter}>{visitRemarks.length} / 300 characters</Text>
+                  {VOICE_NOTES_ENABLED ? (
+                    <TouchableOpacity
+                      style={styles.typeInsteadLink}
+                      onPress={() => setShowTypedReason(false)}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={styles.typeInsteadText}>Record voice note instead</Text>
+                    </TouchableOpacity>
+                  ) : null}
                 </>
               )}
             </View>
@@ -1050,15 +1092,7 @@ export default function CompleteScreen({ route, navigation }) {
 
           {!canEndRecovery ? (
             <Text style={styles.validationNote}>
-              {customerMet === null
-                ? 'Select Visited or Not visited to proceed'
-                : needsEndPhoto && !photo
-                  ? 'Capture ending speedometer photo to proceed'
-                  : customerMet === true && visitedNames.filter((n) => n.trim()).length === 0
-                    ? 'Enter at least one name to proceed'
-                    : customerMet === false && !notMetVoiceUri && !notMetReason.trim()
-                      ? 'Record a voice note or type a reason to proceed'
-                      : ''}
+              {getMissingValidationText()}
             </Text>
           ) : null}
         </View>
@@ -1199,6 +1233,14 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFFFFF', borderWidth: 1.5, borderColor: '#E2E8F0',
     borderRadius: 12, padding: 14, fontSize: 14, color: '#0F172A',
     minHeight: 100, fontWeight: '500',
+  },
+  charCounter: {
+    fontSize: 11,
+    color: '#64748B',
+    fontWeight: '500',
+    alignSelf: 'flex-end',
+    marginTop: 4,
+    marginBottom: 4,
   },
 
   actionSection: { marginTop: 6, marginBottom: 20 },

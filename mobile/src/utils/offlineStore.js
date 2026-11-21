@@ -298,6 +298,7 @@ export async function syncPendingSessions() {
                   accuracy: endLoc.accuracy || 0,
                 }),
                 remarks: session.remarks || session.rawRemarks || '',
+                visitRemarks: session.visitRemarks || '',
                 nlpDetails: session.nlpDetails || '',
                 voiceDurationSeconds: session.voiceUri ? String(session.voiceDurationSeconds || 0) : '',
               };
@@ -307,7 +308,8 @@ export async function syncPendingSessions() {
                 if (session.metAt) base.metAt = session.metAt;
               } else if (session.customerMet === false) {
                 base.customerMet = 'false';
-                if (session.notMetReason) base.notMetReason = session.notMetReason;
+                const nmr = session.notMetReason || session.visitRemarks || '';
+                if (nmr) base.notMetReason = nmr;
               }
               return base;
             })();
@@ -378,6 +380,7 @@ export async function syncPendingSessions() {
               startAddress,
               endAddress,
               remarks: session.remarks || session.rawRemarks || '',
+              visitRemarks: session.visitRemarks || '',
               nlpDetails: session.nlpDetails || '',
               voiceDurationSeconds: session.voiceUri ? String(session.voiceDurationSeconds || 0) : '',
               startLocation: JSON.stringify(session.startLocation || null),
@@ -390,7 +393,8 @@ export async function syncPendingSessions() {
               if (session.metAt) base.metAt = session.metAt;
             } else if (session.customerMet === false) {
               base.customerMet = 'false';
-              if (session.notMetReason) base.notMetReason = session.notMetReason;
+              const nmr = session.notMetReason || session.visitRemarks || '';
+              if (nmr) base.notMetReason = nmr;
             }
             return base;
           })();
@@ -422,6 +426,7 @@ export async function syncPendingSessions() {
                 return rest;
               })(),
               vehicleType: mode,
+              visitRemarks: session.visitRemarks || '',
               movingSeconds: session.movingSeconds != null ? Math.round(session.movingSeconds) : null,
               idleSeconds: session.idleSeconds != null ? Math.round(session.idleSeconds) : null,
               unknownSeconds: session.unknownSeconds != null ? Math.round(session.unknownSeconds) : null,
@@ -431,7 +436,7 @@ export async function syncPendingSessions() {
               customerMet: session.customerMet != null ? String(session.customerMet) : '',
               customerNames: JSON.stringify(session.customerNames || []),
               metAt: session.metAt || '',
-              notMetReason: session.notMetReason || '',
+              notMetReason: session.notMetReason || (session.customerMet === false ? (session.visitRemarks || '') : ''),
               voiceDurationSeconds: String(session.voiceDurationSeconds || 0),
               startLocation: JSON.stringify(session.startLocation || null),
               endLocation: JSON.stringify(session.endLocation || null),
@@ -443,6 +448,7 @@ export async function syncPendingSessions() {
             const walkSyncPayload = {
               ...session,
               vehicleType: mode,
+              visitRemarks: session.visitRemarks || '',
               movingSeconds: session.movingSeconds != null ? Math.round(session.movingSeconds) : null,
               idleSeconds: session.idleSeconds != null ? Math.round(session.idleSeconds) : null,
               unknownSeconds: session.unknownSeconds != null ? Math.round(session.unknownSeconds) : null,
@@ -457,7 +463,8 @@ export async function syncPendingSessions() {
               if (session.metAt) walkSyncPayload.metAt = session.metAt;
             } else if (session.customerMet === false) {
               walkSyncPayload.customerMet = false;
-              if (session.notMetReason) walkSyncPayload.notMetReason = session.notMetReason;
+              const nmr = session.notMetReason || session.visitRemarks;
+              if (nmr) walkSyncPayload.notMetReason = nmr;
             }
             await apiPost('/recovery/sync', walkSyncPayload);
           }

@@ -12,6 +12,7 @@ import { apiGet } from '../api';
 import { API_URL } from '../config';
 import { BADGE_COLORS } from '../utils/nlpSummarizer';
 import { cacheHistory, getCachedHistory, getPendingSessions, syncPendingSessions, getCachedAudio } from '../utils/offlineStore';
+import { VOICE_NOTES_ENABLED } from '../config/features';
 
 let activeProfileVoiceCard = null; // { sessionId, stop() }
 
@@ -503,7 +504,7 @@ function SessionCard({ session }) {
       ) : session.customerMet === false ? (
         <View style={styles.customerNotMetBlock}>
           <Text style={styles.customerNotMetTitle}>✖ Not met the customer</Text>
-          {session.notMetReason ? (
+          {session.notMetReason && (!session.visitRemarks || session.notMetReason.trim() !== session.visitRemarks.trim()) ? (
             <Text style={styles.customerNotMetDetail}>Reason: {session.notMetReason}</Text>
           ) : null}
         </View>
@@ -512,8 +513,16 @@ function SessionCard({ session }) {
         <NlpBadge category={nlpCategory} summary={nlpSummary} />
       )}
 
+      {/* Remarks block with visitRemarks under Met / Not met block */}
+      {session.visitRemarks ? (
+        <View style={styles.remarksBlock}>
+          <Text style={styles.remarksBlockLabel}>Remarks</Text>
+          <Text style={styles.remarksBlockText}>{session.visitRemarks}</Text>
+        </View>
+      ) : null}
+
       {/* Voice note row under Met / Not met block */}
-      {hasVoice ? (
+      {VOICE_NOTES_ENABLED && hasVoice ? (
         <View style={styles.voiceNoteRow}>
           <View style={styles.voiceNoteLeft}>
             <Ionicons name="mic" size={16} color="#475569" style={{ marginRight: 6 }} />
@@ -543,7 +552,7 @@ function SessionCard({ session }) {
           </TouchableOpacity>
         </View>
       ) : null}
-      {voiceError ? (
+      {VOICE_NOTES_ENABLED && voiceError ? (
         <Text style={styles.voiceErrorText}>Could not play the recording.</Text>
       ) : null}
 
@@ -1017,6 +1026,30 @@ const styles = StyleSheet.create({
   },
   customerNotMetTitle: { fontSize: 13, fontWeight: '800', color: '#DC2626', marginBottom: 4 },
   customerNotMetDetail: { fontSize: 12, fontWeight: '500', color: '#991B1B', marginTop: 2 },
+
+  // Remarks block in SessionCard
+  remarksBlock: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 8,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    marginBottom: 12,
+  },
+  remarksBlockLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#64748B',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 4,
+  },
+  remarksBlockText: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: '#1E293B',
+    lineHeight: 18,
+  },
 
   // Speedometer row & modal in SessionCard
   speedometerSection: {
