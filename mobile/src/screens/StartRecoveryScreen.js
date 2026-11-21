@@ -9,6 +9,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
 import { apiUploadFile, apiPost, apiGet } from '../api';
 import { getAccurateLocation } from '../utils/geo';
+import { checkHasNumbers } from '../utils/speedometerCheck';
 
 function generateDeviceSessionId() {
   const ts = Date.now().toString(36);
@@ -68,20 +69,33 @@ export default function StartRecoveryScreen({ route, navigation }) {
   const [transportMode, setTransportMode] = useState('');
   const [vehicleNumber, setVehicleNumber] = useState('');
   const [photo, setPhoto] = useState(null);
+  const [checkingPhoto, setCheckingPhoto] = useState(false);
+  const [speedometerFailedTries, setSpeedometerFailedTries] = useState(0);
+  const [speedometerCheckError, setSpeedometerCheckError] = useState('');
+  const [speedometerSkippedReason, setSpeedometerSkippedReason] = useState(null);
+  const [lastSpeedometerPhoto, setLastSpeedometerPhoto] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
   // ── Planned Location ──────────────────────────────────────────────────────
-  const [locationQuery, setLocationQuery] = useState('');
+  const initialPlannedLoc = route?.params?.plannedLocation || (route?.params?.customer ? {
+    name: route.params.customer.fullAddress || route.params.customer.location || 'Customer Address',
+    latitude: route.params.customer.latitude || 0,
+    longitude: route.params.customer.longitude || 0
+  } : null);
+  const initialPersonCount = route?.params?.plannedPersonCount ? String(route.params.plannedPersonCount) : (route?.params?.customer ? '1' : '');
+  const initialNames = route?.params?.plannedNames || (route?.params?.customer?.customerName ? [route.params.customer.customerName] : (route?.params?.customer?.name ? [route.params.customer.name] : []));
+
+  const [locationQuery, setLocationQuery] = useState(initialPlannedLoc?.name || '');
   const [locationSuggestions, setLocationSuggestions] = useState([]);
-  const [plannedLocation, setPlannedLocation] = useState(null); // { name, latitude, longitude }
+  const [plannedLocation, setPlannedLocation] = useState(initialPlannedLoc); // { name, latitude, longitude }
   const [locationLoading, setLocationLoading] = useState(false);
   const [locationError, setLocationError] = useState('');
   const debounceRef = useRef(null);
 
   // ── Person count & names ──────────────────────────────────────────────────
-  const [plannedPersonCount, setPlannedPersonCount] = useState('');
-  const [plannedNames, setPlannedNames] = useState([]);
+  const [plannedPersonCount, setPlannedPersonCount] = useState(initialPersonCount);
+  const [plannedNames, setPlannedNames] = useState(initialNames);
 
   // Device-side session ID for idempotency & offline safety
   const deviceSessionId = useRef(generateDeviceSessionId()).current;
@@ -193,8 +207,52 @@ export default function StartRecoveryScreen({ route, navigation }) {
       // Camera only — no gallery
     });
     if (!r.canceled && r.assets && r.assets[0] && r.assets[0].uri) {
-      setPhoto(r.assets[0].uri);
+      const capturedUri = r.assets[0].uri;
+      setCheckingPhoto(true);
+      setSpeedometerCheckError('');
+      try {
+        const checkRes = await checkHasNumbers(capturedUri);
+        if (checkRes.ok) {
+          setPhoto(capturedUri);
+          setError('');
+          setSpeedometerCheckError('');
+          setSpeedometerFailedTries(0);
+          setLastSpeedometerPhoto(null);
+          setSpeedometerSkippedReason(checkRes.skipped ? (checkRes.reason || 'error') : null);
+        } else {
+          setPhoto(null);
+          setSpeedometerSkippedReason(null);
+          const nextTries = speedometerFailedTries + 1;
+          setSpeedometerFailedTries(nextTries);
+          setLastSpeedometerPhoto(capturedUri);
+          setSpeedometerCheckError('No numbers found in the photo. Take a clear photo showing the speedometer numbers.');
+        }
+      } catch (err) {
+        // Technical failure must never block
+        setPhoto(capturedUri);
+        setError('');
+        setSpeedometerCheckError('');
+        setSpeedometerFailedTries(0);
+        setLastSpeedometerPhoto(null);
+        let reason = 'error';
+        if (err && typeof err.name === 'string' && err.name && err.name !== 'Error' && /^[A-Za-z0-9_]+$/.test(err.name)) {
+          reason = err.name;
+        }
+        setSpeedometerSkippedReason(reason);
+      } finally {
+        setCheckingPhoto(false);
+      }
+    }
+  };
+
+  const useAnyway = () => {
+    if (lastSpeedometerPhoto) {
+      setPhoto(lastSpeedometerPhoto);
       setError('');
+      setSpeedometerCheckError('');
+      setSpeedometerFailedTries(0);
+      setLastSpeedometerPhoto(null);
+      setSpeedometerSkippedReason(null);
     }
   };
 
@@ -294,6 +352,9 @@ export default function StartRecoveryScreen({ route, navigation }) {
         plannedLocation: JSON.stringify(plannedLocation),
         plannedPersonCount: String(personCount),
         plannedNames: JSON.stringify(trimmedNames),
+        customerId: route?.params?.customerId || route?.params?.customer?.customerId || '',
+        customerRefId: route?.params?.customer?.customerId || route?.params?.customerId || '',
+        customerName: route?.params?.customer?.customerName || route?.params?.customer?.name || '',
       };
 
       let data;
@@ -307,6 +368,9 @@ export default function StartRecoveryScreen({ route, navigation }) {
           plannedLocation,
           plannedPersonCount: personCount,
           plannedNames: trimmedNames,
+          customerId: route?.params?.customerId || route?.params?.customer?.customerId || '',
+          customerRefId: route?.params?.customer?.customerId || route?.params?.customerId || '',
+          customerName: route?.params?.customer?.customerName || route?.params?.customer?.name || '',
         });
       } else {
         // BIKE / CAR: multipart with starting speedometer photo
@@ -356,6 +420,8 @@ export default function StartRecoveryScreen({ route, navigation }) {
         plannedLocation,
         plannedPersonCount: personCount,
         plannedNames: trimmedNames,
+        customer: route?.params?.customer,
+        customerId: route?.params?.customerId || route?.params?.customer?.customerId,
       });
 
     } catch (e) {
@@ -479,6 +545,7 @@ export default function StartRecoveryScreen({ route, navigation }) {
                   if (!mode.requiresVehicle) {
                     setVehicleNumber('');
                     setPhoto(null);
+                    setSpeedometerSkippedReason(null);
                   }
                 }}
                 activeOpacity={0.85}
@@ -607,22 +674,48 @@ export default function StartRecoveryScreen({ route, navigation }) {
               Camera only — capture the speedometer reading before you begin.
             </Text>
 
-            {photo ? (
+            {checkingPhoto ? (
+              <View style={styles.checkingBox}>
+                <ActivityIndicator size="small" color="#2563EB" />
+                <Text style={styles.checkingText}>Checking photo...</Text>
+              </View>
+            ) : photo ? (
               <View style={styles.previewBox}>
                 <Image source={{ uri: photo }} style={styles.previewImage} resizeMode="cover" />
+                {speedometerSkippedReason ? (
+                  <Text style={styles.speedometerSkippedText}>
+                    Number check could not run ({speedometerSkippedReason}). Photo accepted.
+                  </Text>
+                ) : null}
                 <TouchableOpacity style={styles.retakeBtn} onPress={takeSpeedometer}>
                   <Ionicons name="camera-reverse-outline" size={16} color="#2563EB" style={{ marginRight: 6 }} />
                   <Text style={styles.retakeBtnText}>Retake Photo</Text>
                 </TouchableOpacity>
               </View>
             ) : (
-              <TouchableOpacity style={styles.cameraBtn} onPress={takeSpeedometer} activeOpacity={0.85}>
-                <View style={styles.cameraIconBg}>
-                  <Ionicons name="camera" size={32} color="#2563EB" />
-                </View>
-                <Text style={styles.cameraBtnTitle}>Capture Speedometer Photo</Text>
-                <Text style={styles.cameraBtnSub}>Camera only · Gallery upload not allowed</Text>
-              </TouchableOpacity>
+              <View>
+                {speedometerCheckError ? (
+                  <View style={styles.speedometerErrorBox}>
+                    <Ionicons name="alert-circle-outline" size={18} color="#DC2626" style={{ marginRight: 8, marginTop: 1 }} />
+                    <Text style={styles.speedometerErrorText}>{speedometerCheckError}</Text>
+                  </View>
+                ) : null}
+
+                {speedometerFailedTries >= 3 && lastSpeedometerPhoto ? (
+                  <TouchableOpacity style={styles.useAnywayBtn} onPress={useAnyway} activeOpacity={0.85}>
+                    <Ionicons name="checkmark-circle-outline" size={18} color="#15803D" style={{ marginRight: 6 }} />
+                    <Text style={styles.useAnywayBtnText}>Use this photo anyway</Text>
+                  </TouchableOpacity>
+                ) : null}
+
+                <TouchableOpacity style={styles.cameraBtn} onPress={takeSpeedometer} activeOpacity={0.85}>
+                  <View style={styles.cameraIconBg}>
+                    <Ionicons name="camera" size={32} color="#2563EB" />
+                  </View>
+                  <Text style={styles.cameraBtnTitle}>Capture Speedometer Photo</Text>
+                  <Text style={styles.cameraBtnSub}>Camera only · Gallery upload not allowed</Text>
+                </TouchableOpacity>
+              </View>
             )}
           </>
         ) : null}
@@ -740,12 +833,37 @@ const styles = StyleSheet.create({
     alignItems: 'center', borderWidth: 1, borderColor: '#E2E8F0', marginBottom: 16,
   },
   previewImage: { width: '100%', height: 190, borderRadius: 10 },
+  speedometerSkippedText: {
+    color: '#64748B',
+    fontSize: 12,
+    marginTop: 8,
+    textAlign: 'center',
+  },
   retakeBtn: {
     flexDirection: 'row', alignItems: 'center',
     marginTop: 12, paddingVertical: 7, paddingHorizontal: 14,
     backgroundColor: '#EFF6FF', borderRadius: 8, borderWidth: 1, borderColor: '#BFDBFE',
   },
   retakeBtnText: { color: '#2563EB', fontSize: 13, fontWeight: '700' },
+
+  checkingBox: {
+    backgroundColor: '#EFF6FF', borderRadius: 14, padding: 24,
+    alignItems: 'center', justifyContent: 'center', borderWidth: 1.5,
+    borderColor: '#BFDBFE', marginBottom: 16, flexDirection: 'row',
+  },
+  checkingText: { fontSize: 14, fontWeight: '600', color: '#2563EB', marginLeft: 8 },
+  speedometerErrorBox: {
+    flexDirection: 'row', alignItems: 'flex-start',
+    backgroundColor: '#FEF2F2', padding: 12, borderRadius: 10,
+    marginBottom: 12, borderWidth: 1, borderColor: '#FCA5A5',
+  },
+  speedometerErrorText: { color: '#DC2626', fontSize: 13, fontWeight: '500', flex: 1, lineHeight: 18 },
+  useAnywayBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    backgroundColor: '#F0FDF4', borderWidth: 1.5, borderColor: '#86EFAC',
+    borderRadius: 12, paddingVertical: 12, paddingHorizontal: 16, marginBottom: 12,
+  },
+  useAnywayBtnText: { color: '#15803D', fontSize: 14, fontWeight: '700' },
 
   actionArea: { marginTop: 24, marginBottom: 20 },
   startBtn: {

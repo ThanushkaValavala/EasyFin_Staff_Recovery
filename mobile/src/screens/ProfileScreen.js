@@ -1,30 +1,27 @@
-import { useCallback, useEffect, useState, useMemo } from 'react';
+import { useCallback, useEffect, useRef, useState, useMemo } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  ActivityIndicator, RefreshControl, Alert, TextInput, Image,
+  ActivityIndicator, RefreshControl, Alert, TextInput, Modal, Image, Platform,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
 import * as Location from 'expo-location';
+import { createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import { apiGet } from '../api';
+import { API_URL } from '../config';
 import { BADGE_COLORS } from '../utils/nlpSummarizer';
-import { cacheHistory, getCachedHistory, getPendingSessions, syncPendingSessions } from '../utils/offlineStore';
+import { cacheHistory, getCachedHistory, getPendingSessions, syncPendingSessions, getCachedAudio } from '../utils/offlineStore';
 
-/** Fetch signed voice URL and play it. Errors are handled quietly. */
-async function playVoiceNote(sessionId) {
-  try {
-    const res = await apiGet(`/recovery/sessions/${sessionId}/voice-url`);
-    const url = res?.url || res?.signedUrl || res?.voiceUrl;
-    if (!url) return;
-    const { AudioPlayer } = await import('expo-audio');
-    const player = new AudioPlayer(url);
-    player.play();
-  } catch (e) {
-    // handle quietly
-    console.warn('[ProfileScreen] Voice playback error:', e.message);
-  }
-}
+let activeProfileVoiceCard = null; // { sessionId, stop() }
+
+const fmtVoiceDuration = (s) => {
+  if (s == null || isNaN(s)) return '';
+  const total = Math.max(0, Math.round(s));
+  const m = Math.floor(total / 60);
+  const sec = total % 60;
+  return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+};
 
 const memoryAddressCache = new Map();
 const signedUrlCache = new Map();
@@ -174,7 +171,197 @@ function InfoRow({ icon, label, value, wrapValue }) {
   );
 }
 
+// Cache entry: { source: { uri: string, headers?: object }, fetchedAt: number, isSigned: boolean }
+const evidenceSourceCache = new Map();
+const evidenceInFlightCache = new Map();
+
+export async function resolveEvidenceSource(evidenceId, forceFresh = false) {
+  if (!evidenceId) return null;
+  const now = Date.now();
+  if (!forceFresh && evidenceSourceCache.has(evidenceId)) {
+    const cached = evidenceSourceCache.get(evidenceId);
+    // Non-signed URLs (/image) never expire. Signed URLs expire after 300s, treat as expired after 240s (4 mins)
+    if (!cached.isSigned || (now - cached.fetchedAt < 240000)) {
+      return cached.source;
+    }
+  }
+  if (!forceFresh && evidenceInFlightCache.has(evidenceId)) {
+    return evidenceInFlightCache.get(evidenceId);
+  }
+
+  const promise = (async () => {
+    // 1. Ask for secured link
+    try {
+      const res = await apiGet(`/recovery/evidence/${evidenceId}/url`);
+      if (res && res.url) {
+        const src = { uri: res.url };
+        evidenceSourceCache.set(evidenceId, { source: src, fetchedAt: Date.now(), isSigned: true });
+        return src;
+      }
+    } catch (_e) {
+      // Direct image fallback for MongoDB-stored evidence or network/url failure
+    }
+
+    // 2. Load /recovery/evidence/:id/image with Authorization header (no expiry)
+    try {
+      const token = await SecureStore.getItemAsync('token');
+      const src = {
+        uri: `${API_URL}/recovery/evidence/${evidenceId}/image`,
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      };
+      evidenceSourceCache.set(evidenceId, { source: src, fetchedAt: Date.now(), isSigned: false });
+      return src;
+    } catch (_err) {
+      return null;
+    } finally {
+      evidenceInFlightCache.delete(evidenceId);
+    }
+  })();
+
+  evidenceInFlightCache.set(evidenceId, promise);
+  return promise;
+}
+
+export function SpeedometerThumbnail({ label, evidenceId, localUri, onOpen }) {
+  const [source, setSource] = useState(() => {
+    if (localUri) return { uri: localUri };
+    if (evidenceId && evidenceSourceCache.has(evidenceId)) {
+      const c = evidenceSourceCache.get(evidenceId);
+      if (!c.isSigned || (Date.now() - c.fetchedAt < 240000)) {
+        return c.source;
+      }
+    }
+    return null;
+  });
+  const [loading, setLoading] = useState(() => {
+    if (localUri) return false;
+    if (evidenceId && evidenceSourceCache.has(evidenceId)) {
+      const c = evidenceSourceCache.get(evidenceId);
+      if (!c.isSigned || (Date.now() - c.fetchedAt < 240000)) {
+        return false;
+      }
+    }
+    return !!evidenceId;
+  });
+  const [loadError, setLoadError] = useState(false);
+  const retriedRef = useRef(false);
+
+  useEffect(() => {
+    let active = true;
+    retriedRef.current = false;
+    if (localUri) {
+      setSource({ uri: localUri });
+      setLoading(false);
+      setLoadError(false);
+      return;
+    }
+    if (!evidenceId) {
+      setLoading(false);
+      return;
+    }
+
+    const cached = evidenceSourceCache.get(evidenceId);
+    if (cached && (!cached.isSigned || (Date.now() - cached.fetchedAt < 240000))) {
+      setSource(cached.source);
+      setLoading(false);
+      setLoadError(false);
+      return;
+    }
+
+    setLoading(true);
+    setLoadError(false);
+    resolveEvidenceSource(evidenceId)
+      .then((src) => {
+        if (!active) return;
+        if (src) {
+          setSource(src);
+        } else {
+          setLoadError(true);
+        }
+        setLoading(false);
+      })
+      .catch(() => {
+        if (!active) return;
+        setLoadError(true);
+        setLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [evidenceId, localUri]);
+
+  const handleImageError = () => {
+    // Retry once with a fresh request when signed image fails to load
+    if (!retriedRef.current && evidenceId) {
+      retriedRef.current = true;
+      setLoading(true);
+      resolveEvidenceSource(evidenceId, true)
+        .then((src) => {
+          if (src) {
+            setSource(src);
+            setLoadError(false);
+          } else {
+            setLoadError(true);
+          }
+        })
+        .catch(() => {
+          setLoadError(true);
+        })
+        .finally(() => {
+          setLoading(false);
+        });
+    } else {
+      setLoadError(true);
+    }
+  };
+
+  return (
+    <View style={styles.thumbnailContainer}>
+      <TouchableOpacity
+        style={styles.thumbnailWrapper}
+        onPress={() => {
+          if (source && !loadError && !loading) {
+            onOpen(source);
+          }
+        }}
+        disabled={loading || loadError || !source}
+        activeOpacity={0.8}
+      >
+        {loading ? (
+          <View style={styles.thumbnailPlaceholder}>
+            <ActivityIndicator size="small" color="#94A3B8" />
+          </View>
+        ) : loadError || !source ? (
+          <View style={styles.thumbnailPlaceholder}>
+            <Ionicons name="videocam-off-outline" size={22} color="#94A3B8" />
+          </View>
+        ) : (
+          <Image
+            source={source}
+            style={styles.thumbnailImage}
+            resizeMode="cover"
+            onError={handleImageError}
+          />
+        )}
+      </TouchableOpacity>
+      <Text style={styles.thumbnailCaption}>{label}</Text>
+    </View>
+  );
+}
+
 function SessionCard({ session }) {
+  const [modalImage, setModalImage] = useState(null);
+
+  const startEvidenceId = session.startSpeedometerEvidenceId;
+  const startLocalUri = session.startPhotoUri;
+  const endEvidenceId = session.endSpeedometerEvidenceId;
+  const endLocalUri = session.endPhotoUri;
+
+  const hasStart = !!(startEvidenceId || startLocalUri);
+  const hasEnd = !!(endEvidenceId || endLocalUri);
+  const hasAnyPhoto = hasStart || hasEnd;
+
   const vehicleLabel = session.vehicleType
     ? session.vehicleType.charAt(0).toUpperCase() + session.vehicleType.slice(1).toLowerCase()
     : 'Walk';
@@ -201,17 +388,92 @@ function SessionCard({ session }) {
   }
 
   // Voice note
-  const hasVoice = !!(session.voicePath || session.voiceUri);
-  const sessionIdForVoice = session._id || session.sessionId;
+  const hasVoice = Boolean(session.voicePath || session.voiceUri);
+  const sessionIdForVoice = session.sessionId || session._id || session.deviceSessionId;
   const [voicePlaying, setVoicePlaying] = useState(false);
+  const [voiceLoading, setVoiceLoading] = useState(false);
+  const [voiceError, setVoiceError] = useState(false);
+  const cardPlayerRef = useRef(null);
 
-  const handlePlayVoice = async () => {
-    if (!sessionIdForVoice) return;
-    setVoicePlaying(true);
+  const stopVoicePlayback = useCallback(() => {
+    if (cardPlayerRef.current) {
+      try {
+        cardPlayerRef.current.pause();
+        cardPlayerRef.current.remove();
+      } catch (_) {}
+      cardPlayerRef.current = null;
+    }
+    setVoicePlaying(false);
+    setVoiceLoading(false);
+    if (activeProfileVoiceCard && activeProfileVoiceCard.sessionId === sessionIdForVoice) {
+      activeProfileVoiceCard = null;
+    }
+  }, [sessionIdForVoice]);
+
+  useEffect(() => {
+    return () => {
+      stopVoicePlayback();
+    };
+  }, [stopVoicePlayback]);
+
+  const handleToggleVoice = async () => {
+    setVoiceError(false);
+    if (voicePlaying) {
+      stopVoicePlayback();
+      return;
+    }
+
+    if (activeProfileVoiceCard && activeProfileVoiceCard.sessionId !== sessionIdForVoice) {
+      try {
+        activeProfileVoiceCard.stop();
+      } catch (_) {}
+    }
+    activeProfileVoiceCard = { sessionId: sessionIdForVoice, stop: stopVoicePlayback };
+
+    setVoiceLoading(true);
     try {
-      await playVoiceNote(sessionIdForVoice);
+      let localAudioPath = null;
+      if (session.voiceUri && session.voiceUri.startsWith('file://')) {
+        localAudioPath = session.voiceUri;
+      } else if (sessionIdForVoice) {
+        localAudioPath = await getCachedAudio(sessionIdForVoice, async (id) => {
+          const res = await apiGet(`/recovery/sessions/${id}/voice-url`);
+          return res?.url || res?.signedUrl || res?.voiceUrl;
+        });
+      }
+
+      if (!localAudioPath) {
+        setVoiceError(true);
+        setVoiceLoading(false);
+        return;
+      }
+
+      await setAudioModeAsync({
+        allowsRecording: false,
+        playsInSilentMode: true,
+        shouldRouteThroughEarpiece: false,
+      });
+
+      if (cardPlayerRef.current) {
+        try {
+          cardPlayerRef.current.remove();
+        } catch (_) {}
+      }
+
+      const player = createAudioPlayer(localAudioPath);
+      cardPlayerRef.current = player;
+      player.addListener('playbackStatusUpdate', (status) => {
+        if (status.didJustFinish) {
+          setVoicePlaying(false);
+          player.seekTo(0).catch(() => {});
+        }
+      });
+      player.play();
+      setVoicePlaying(true);
+    } catch (_err) {
+      setVoiceError(true);
     } finally {
-      setVoicePlaying(false);
+      setVoiceLoading(false);
     }
   };
 
@@ -345,7 +607,42 @@ function SessionCard({ session }) {
         <NlpBadge category={nlpCategory} summary={nlpSummary} />
       ) : null}
 
-      {/* Customer visited label */}
+      {/* Voice note row (shown for new recoveries that have audio) */}
+      {hasVoice ? (
+        <View style={styles.voiceNoteRow}>
+          <View style={styles.voiceNoteLeft}>
+            <Ionicons name="mic" size={16} color="#475569" style={{ marginRight: 6 }} />
+            <Text style={styles.voiceNoteLabel}>
+              Voice note{session.voiceDurationSeconds ? ` (${fmtVoiceDuration(session.voiceDurationSeconds)})` : ''}
+            </Text>
+          </View>
+          <TouchableOpacity
+            style={styles.voicePlayBtn}
+            onPress={handleToggleVoice}
+            disabled={voiceLoading}
+            activeOpacity={0.7}
+          >
+            {voiceLoading ? (
+              <ActivityIndicator size="small" color="#2563EB" />
+            ) : (
+              <>
+                <Ionicons
+                  name={voicePlaying ? 'pause-circle-outline' : 'play-circle-outline'}
+                  size={18}
+                  color="#2563EB"
+                  style={{ marginRight: 4 }}
+                />
+                <Text style={styles.voicePlayBtnText}>{voicePlaying ? 'Pause' : 'Play'}</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        </View>
+      ) : null}
+      {voiceError ? (
+        <Text style={styles.voiceErrorText}>Could not play the recording.</Text>
+      ) : null}
+
+      {/* Customer visited label chip */}
       {visitedLabel ? (
         <View style={styles.visitedRow}>
           <Ionicons
@@ -363,46 +660,61 @@ function SessionCard({ session }) {
         </View>
       ) : null}
 
-      {/* Speedometer & Route Thumbnails */}
-      {(startPhotoUrl || endPhotoUrl || routePhotoUrl) ? (
-        <View style={styles.thumbnailRow}>
-          {startPhotoUrl ? (
-            <View style={styles.thumbWrapper}>
-              <Image source={{ uri: startPhotoUrl }} style={styles.thumbnail} />
-              <Text style={styles.thumbLabel}>Start</Text>
-            </View>
-          ) : null}
-          {endPhotoUrl ? (
-            <View style={styles.thumbWrapper}>
-              <Image source={{ uri: endPhotoUrl }} style={styles.thumbnail} />
-              <Text style={styles.thumbLabel}>End</Text>
-            </View>
-          ) : null}
-          {routePhotoUrl ? (
-            <View style={styles.thumbWrapper}>
-              <Image source={{ uri: routePhotoUrl }} style={styles.thumbnail} />
-              <Text style={styles.thumbLabel}>Route</Text>
-            </View>
-          ) : null}
+      {/* Speedometer thumbnails */}
+      {hasAnyPhoto ? (
+        <View style={styles.speedometerSection}>
+          <Text style={styles.speedometerSectionLabel}>Speedometer</Text>
+          <View style={styles.speedometerThumbnailsRow}>
+            {hasStart ? (
+              <SpeedometerThumbnail
+                label="Start"
+                evidenceId={startEvidenceId}
+                localUri={startLocalUri}
+                onOpen={(src) => setModalImage({ source: src, title: 'Start Speedometer' })}
+              />
+            ) : null}
+            {hasEnd ? (
+              <SpeedometerThumbnail
+                label="End"
+                evidenceId={endEvidenceId}
+                localUri={endLocalUri}
+                onOpen={(src) => setModalImage({ source: src, title: 'End Speedometer' })}
+              />
+            ) : null}
+          </View>
         </View>
       ) : null}
 
-      {/* Play voice note button */}
-      {hasVoice && sessionIdForVoice ? (
-        <TouchableOpacity
-          style={styles.playVoiceBtn}
-          onPress={handlePlayVoice}
-          disabled={voicePlaying}
-          activeOpacity={0.7}
-        >
-          {voicePlaying ? (
-            <ActivityIndicator size="small" color="#2563EB" style={{ marginRight: 6 }} />
-          ) : (
-            <Ionicons name="play-circle-outline" size={16} color="#2563EB" style={{ marginRight: 6 }} />
-          )}
-          <Text style={styles.playVoiceBtnText}>Play voice note</Text>
-        </TouchableOpacity>
-      ) : null}
+      {/* Full-size photo Modal */}
+      <Modal
+        visible={!!modalImage}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setModalImage(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>{modalImage?.title || 'Speedometer'}</Text>
+            <TouchableOpacity
+              style={styles.modalCloseBtn}
+              onPress={() => setModalImage(null)}
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="close" size={24} color="#FFFFFF" />
+            </TouchableOpacity>
+          </View>
+          <View style={styles.modalImageContainer}>
+            {modalImage ? (
+              <Image
+                source={modalImage.source}
+                style={styles.modalFullImage}
+                resizeMode="contain"
+              />
+            ) : null}
+          </View>
+        </View>
+      </Modal>
 
       <View style={styles.sessionInfoGrid}>
         <InfoRow icon="time-outline" label="Start Time" value={fmtTime(session.startTime)} />
@@ -962,12 +1274,20 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: '#E2E8F0', marginBottom: 8, alignSelf: 'flex-start',
   },
   visitedText: { fontSize: 12, fontWeight: '700' },
-  playVoiceBtn: {
-    flexDirection: 'row', alignItems: 'center',
-    backgroundColor: '#EFF6FF', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6,
-    borderWidth: 1, borderColor: '#BFDBFE', marginBottom: 8, alignSelf: 'flex-start',
+  voiceNoteRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    backgroundColor: '#F8FAFC', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10,
+    borderWidth: 1, borderColor: '#E2E8F0', marginBottom: 12,
   },
-  playVoiceBtnText: { fontSize: 12, fontWeight: '700', color: '#2563EB' },
+  voiceNoteLeft: { flexDirection: 'row', alignItems: 'center', flex: 1, marginRight: 8 },
+  voiceNoteLabel: { fontSize: 13, fontWeight: '600', color: '#334155' },
+  voicePlayBtn: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: '#EFF6FF', borderRadius: 8, paddingVertical: 6, paddingHorizontal: 12,
+    borderWidth: 1, borderColor: '#BFDBFE',
+  },
+  voicePlayBtnText: { fontSize: 13, fontWeight: '700', color: '#2563EB' },
+  voiceErrorText: { fontSize: 12, color: '#DC2626', marginBottom: 8, marginTop: -4 },
   recoveriesPerDaySection: { marginBottom: 20 },
   filterCard: {
     backgroundColor: '#FFFFFF', borderRadius: 14, padding: 14,
@@ -1024,16 +1344,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12, paddingTop: 6, paddingBottom: 6,
     backgroundColor: '#F8FAFC', borderTopWidth: 1, borderTopColor: '#F1F5F9',
   },
-  thumbnailRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 12,
-    marginTop: 10, marginBottom: 4,
-  },
-  thumbWrapper: { alignItems: 'center' },
-  thumbnail: {
-    width: 64, height: 64, borderRadius: 8,
-    backgroundColor: '#E2E8F0', borderWidth: 1, borderColor: '#CBD5E1',
-  },
-  thumbLabel: { fontSize: 11, fontWeight: '700', color: '#64748B', marginTop: 3 },
   recoveriesPerDayRow: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     backgroundColor: '#FFFFFF', borderRadius: 14, padding: 16,
@@ -1043,4 +1353,102 @@ const styles = StyleSheet.create({
   },
   recoveriesPerDayLeft: { flexDirection: 'row', alignItems: 'center' },
   recoveriesPerDayTitle: { fontSize: 14, fontWeight: '700', color: '#0F172A' },
+
+  // Customer-met / not-met blocks in SessionCard
+  customerMetBlock: {
+    backgroundColor: '#F0FDF4', borderRadius: 8, padding: 10,
+    borderWidth: 1, borderColor: '#BBF7D0', marginBottom: 12,
+  },
+  customerMetTitle: { fontSize: 13, fontWeight: '800', color: '#15803D', marginBottom: 4 },
+  customerMetDetail: { fontSize: 12, fontWeight: '500', color: '#166534', marginTop: 2 },
+
+  customerNotMetBlock: {
+    backgroundColor: '#FEF2F2', borderRadius: 8, padding: 10,
+    borderWidth: 1, borderColor: '#FCA5A5', marginBottom: 12,
+  },
+  customerNotMetTitle: { fontSize: 13, fontWeight: '800', color: '#DC2626', marginBottom: 4 },
+  customerNotMetDetail: { fontSize: 12, fontWeight: '500', color: '#991B1B', marginTop: 2 },
+
+  // Speedometer row & modal in SessionCard
+  speedometerSection: {
+    marginTop: 6,
+    marginBottom: 10,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+  },
+  speedometerSectionLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#64748B',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 8,
+  },
+  speedometerThumbnailsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+  },
+  thumbnailContainer: {
+    alignItems: 'center',
+  },
+  thumbnailWrapper: {
+    width: 64,
+    height: 64,
+    borderRadius: 10,
+    overflow: 'hidden',
+    backgroundColor: '#E2E8F0',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+  },
+  thumbnailImage: {
+    width: '100%',
+    height: '100%',
+  },
+  thumbnailPlaceholder: {
+    width: 64,
+    height: 64,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  thumbnailCaption: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#475569',
+    marginTop: 4,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.94)',
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingTop: Platform.OS === 'ios' ? 56 : 24,
+    paddingBottom: 12,
+  },
+  modalTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+  modalCloseBtn: {
+    padding: 6,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.18)',
+  },
+  modalImageContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 16,
+  },
+  modalFullImage: {
+    width: '100%',
+    height: '100%',
+  },
 });

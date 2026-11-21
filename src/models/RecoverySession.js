@@ -7,6 +7,8 @@ const recoverySessionSchema = new mongoose.Schema(
     staffId: { type: mongoose.Schema.Types.Mixed, ref: 'Staff', index: true }, // backward-compatibility
     assignmentId: { type: mongoose.Schema.Types.Mixed, ref: 'Assignment', index: true },
     customerId: { type: mongoose.Schema.Types.Mixed, ref: 'Customer' },
+    customerRefId: { type: String, default: '', index: true },
+    customerName: { type: String, default: '' },
     loanId: { type: mongoose.Schema.Types.Mixed, ref: 'Loan' },
     startTime: { type: Date, required: true, default: Date.now },
     endTime: { type: Date, default: null },

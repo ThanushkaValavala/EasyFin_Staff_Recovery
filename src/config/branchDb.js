@@ -11,6 +11,8 @@ const Assignment = require('../models/Assignment');
 const Customer = require('../models/Customer');
 const Loan = require('../models/Loan');
 const RecoveryReport = require('../models/RecoveryReport');
+const CompletedTask = require('../models/CompletedTask');
+const TaskAuditLog = require('../models/TaskAuditLog');
 
 let connBranch1 = null;
 let connBranch2 = null;
@@ -33,6 +35,8 @@ function registerBranchModels(conn) {
   const customerModel = conn.models.Customer || conn.model('Customer', Customer.schema);
   const loanModel = conn.models.Loan || conn.model('Loan', Loan.schema);
   const recoveryReportModel = conn.models.RecoveryReport || conn.model('RecoveryReport', RecoveryReport.schema);
+  const completedTaskModel = conn.models.CompletedTask || conn.model('CompletedTask', CompletedTask.schema);
+  const taskAuditLogModel = conn.models.TaskAuditLog || conn.model('TaskAuditLog', TaskAuditLog.schema);
 
   return {
     Staff: staffModel,
@@ -46,6 +50,8 @@ function registerBranchModels(conn) {
     Customer: customerModel,
     Loan: loanModel,
     RecoveryReport: recoveryReportModel,
+    CompletedTask: completedTaskModel,
+    TaskAuditLog: taskAuditLogModel,
   };
 }
 

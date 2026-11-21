@@ -1,4 +1,4 @@
-﻿import { File } from 'expo-file-system';
+import { File } from 'expo-file-system';
 import * as SecureStore from 'expo-secure-store';
 import { API_URL } from './config';
 
@@ -55,6 +55,14 @@ async function request(method, path, body) {
   return data;
 }
 
+export function toFileUri(uri) {
+  if (!uri || typeof uri !== 'string' || !uri.trim()) return null;
+  const trimmed = uri.trim();
+  if (trimmed.startsWith('file://')) return trimmed;
+  if (trimmed.startsWith('/')) return `file://${trimmed}`;
+  return trimmed;
+}
+
 export const apiGet = (path) => request('GET', path);
 export const apiPost = (path, body) => request('POST', path, body);
 export const apiPatch = (path, body) => request('PATCH', path, body);
@@ -65,7 +73,10 @@ export async function apiUpload(path, fields, fileUri) {
   Object.entries(fields || {}).forEach(([k, v]) => {
     if (v !== undefined && v !== null) form.append(k, String(v));
   });
-  form.append('photo', new File(fileUri));
+  const resolved = toFileUri(fileUri);
+  if (resolved) {
+    form.append('photo', new File(resolved));
+  }
   const res = await fetch(`${API_URL}${path}`, {
     method: 'POST',
     headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -87,7 +98,10 @@ export async function apiUploadFile(path, fields, fieldName, fileUri) {
     if (v === undefined || v === null) return;
     form.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
   });
-  form.append(fieldName, new File(fileUri));
+  const resolved = toFileUri(fileUri);
+  if (resolved) {
+    form.append(fieldName, new File(resolved));
+  }
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 90000);
   try {
@@ -121,8 +135,9 @@ export async function apiUploadFiles(path, fields, filesMap) {
     form.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
   });
   Object.entries(filesMap || {}).forEach(([fieldName, fileUri]) => {
-    if (fileUri) {
-      form.append(fieldName, new File(fileUri));
+    const resolved = toFileUri(fileUri);
+    if (resolved) {
+      form.append(fieldName, new File(resolved));
     }
   });
   const ctrl = new AbortController();

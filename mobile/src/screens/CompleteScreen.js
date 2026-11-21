@@ -8,11 +8,34 @@ import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
 import MapView, { Polyline, Marker } from 'react-native-maps';
 import { Ionicons } from '@expo/vector-icons';
-import { useAudioRecorder, AudioModule, RecordingPresets } from 'expo-audio';
-import { apiUploadFile, apiPost, apiUploadFiles, apiGet } from '../api';
+import { useAudioRecorder, AudioModule, createAudioPlayer, setAudioModeAsync } from 'expo-audio';
+import { File, Paths } from 'expo-file-system';
+import { apiUploadFile, apiPost, apiUploadFiles, apiGet, toFileUri } from '../api';
 import { formatDistance, formatDuration } from '../utils/geo';
-import { summarize } from '../utils/nlpSummarizer';
-import { savePendingSession } from '../utils/offlineStore';
+import { savePendingSession, copyRecordingToCache } from '../utils/offlineStore';
+import { checkHasNumbers } from '../utils/speedometerCheck';
+
+if (!Object.prototype.hasOwnProperty.call(File.prototype, 'type')) {
+  Object.defineProperty(File.prototype, 'type', {
+    get() {
+      if (this._type) return this._type;
+      const ext = (this.extension || '').toLowerCase();
+      if (ext === '.m4a' || ext === '.mp4') return 'audio/mp4';
+      if (ext === '.aac') return 'audio/aac';
+      if (ext === '.mp3') return 'audio/mpeg';
+      if (ext === '.wav') return 'audio/wav';
+      if (ext === '.caf') return 'audio/x-caf';
+      if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+      if (ext === '.png') return 'image/png';
+      if (ext === '.webp') return 'image/webp';
+      return 'application/octet-stream';
+    },
+    set(v) {
+      this._type = v;
+    },
+    configurable: true,
+  });
+}
 
 function isNetworkError(e) {
   if (!e) return false;
@@ -62,7 +85,7 @@ async function getReadableAddress(p) {
       const uniqueParts = parts.filter((part, idx) => parts.indexOf(part) === idx);
       return uniqueParts.join(', ') || '';
     }
-  } catch (e) {}
+  } catch (e) { }
   return '';
 }
 
@@ -75,6 +98,28 @@ function fmtRecordTime(secs) {
 
 const MAX_RECORD_SECONDS = 180; // 3 minutes
 
+const VOICE_RECORDING_OPTIONS = {
+  extension: '.m4a',
+  sampleRate: 44100,
+  numberOfChannels: 1,
+  bitRate: 64000,
+  android: {
+    outputFormat: 'mpeg4',
+    audioEncoder: 'aac',
+  },
+  ios: {
+    outputFormat: 'aac ',
+    audioQuality: 64, // Medium quality
+    linearPCMBitDepth: 16,
+    linearPCMIsBigEndian: false,
+    linearPCMIsFloat: false,
+  },
+  web: {
+    mimeType: 'audio/mp4',
+    bitsPerSecond: 64000,
+  },
+};
+
 /**
  * VoiceRecorder component
  * States: idle → recording → recorded → (can re-record or play)
@@ -83,7 +128,7 @@ const MAX_RECORD_SECONDS = 180; // 3 minutes
  *   onCleared() — called when recording is cleared
  */
 function VoiceRecorder({ onRecorded, onCleared }) {
-  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const audioRecorder = useAudioRecorder(VOICE_RECORDING_OPTIONS);
   const [recorderState, setRecorderState] = useState('idle'); // idle | recording | recorded
   const [recordedUri, setRecordedUri] = useState(null);
   const [recordedDuration, setRecordedDuration] = useState(0);
@@ -91,14 +136,18 @@ function VoiceRecorder({ onRecorded, onCleared }) {
   const [permDenied, setPermDenied] = useState(false);
   const [playerState, setPlayerState] = useState('stopped'); // stopped | playing
   const timerRef = useRef(null);
-  const playerRef = useRef(null); // expo-audio Sound ref
+  const playerRef = useRef(null);
 
   // cleanup on unmount
   useEffect(() => {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
       if (playerRef.current) {
-        playerRef.current.remove().catch(() => {});
+        try {
+          playerRef.current.pause();
+          playerRef.current.remove();
+        } catch (_) {}
+        playerRef.current = null;
       }
     };
   }, []);
@@ -112,6 +161,21 @@ function VoiceRecorder({ onRecorded, onCleared }) {
     }
     setPermDenied(false);
     try {
+      if (playerRef.current) {
+        try {
+          playerRef.current.pause();
+          playerRef.current.remove();
+        } catch (_) {}
+        playerRef.current = null;
+      }
+      setPlayerState('stopped');
+
+      await setAudioModeAsync({
+        allowsRecording: true,
+        playsInSilentMode: true,
+        shouldRouteThroughEarpiece: false,
+      });
+
       await audioRecorder.prepareToRecordAsync();
       audioRecorder.record();
       setRecorderState('recording');
@@ -137,11 +201,35 @@ function VoiceRecorder({ onRecorded, onCleared }) {
     }
     try {
       const uri = await audioRecorder.stop();
+      // Switch audio mode to playback immediately
+      await setAudioModeAsync({
+        allowsRecording: false,
+        playsInSilentMode: true,
+        shouldRouteThroughEarpiece: false,
+      });
+
+      // Save as voice.m4a with explicit audio/mp4 type in cache
+      const normalizedUri = toFileUri(uri);
+      let finalUri = normalizedUri;
+      if (normalizedUri) {
+        try {
+          const src = new File(normalizedUri);
+          const target = new File(Paths.cache, 'voice.m4a');
+          if (target.exists) {
+            try { target.delete(); } catch (_) {}
+          }
+          await src.copy(target);
+          finalUri = toFileUri(target.uri) || target.uri;
+        } catch (_) {
+          finalUri = normalizedUri;
+        }
+      }
+
       const dur = elapsed;
-      setRecordedUri(uri);
+      setRecordedUri(finalUri);
       setRecordedDuration(dur);
       setRecorderState('recorded');
-      onRecorded && onRecorded(uri, dur);
+      onRecorded && onRecorded(finalUri, dur);
     } catch (err) {
       Alert.alert('Recording Error', err.message || 'Could not stop recording.');
       setRecorderState('idle');
@@ -156,37 +244,52 @@ function VoiceRecorder({ onRecorded, onCleared }) {
     setRecorderState('idle');
     setPlayerState('stopped');
     if (playerRef.current) {
-      await playerRef.current.remove().catch(() => {});
+      try {
+        playerRef.current.pause();
+        playerRef.current.remove();
+      } catch (_) {}
       playerRef.current = null;
     }
     onCleared && onCleared();
   };
 
   const playRecording = async () => {
-    if (!recordedUri) return;
+    const localUri = toFileUri(recordedUri);
+    if (!localUri) return;
     if (playerState === 'playing') {
-      // stop playback
+      // pause playback
       if (playerRef.current) {
-        await playerRef.current.pauseAsync().catch(() => {});
+        try {
+          playerRef.current.pause();
+        } catch (_) {}
       }
       setPlayerState('stopped');
       return;
     }
     try {
-      const { AudioPlayer } = await import('expo-audio');
+      await setAudioModeAsync({
+        allowsRecording: false,
+        playsInSilentMode: true,
+        shouldRouteThroughEarpiece: false,
+      });
+
       if (playerRef.current) {
-        await playerRef.current.remove().catch(() => {});
+        try {
+          playerRef.current.remove();
+        } catch (_) {}
+        playerRef.current = null;
       }
-      const player = new AudioPlayer(recordedUri);
+
+      const player = createAudioPlayer(localUri);
       playerRef.current = player;
-      player.play();
-      setPlayerState('playing');
-      // Reset icon when done
       player.addListener('playbackStatusUpdate', (status) => {
         if (status.didJustFinish) {
           setPlayerState('stopped');
+          player.seekTo(0).catch(() => {});
         }
       });
+      player.play();
+      setPlayerState('playing');
     } catch (err) {
       Alert.alert('Playback Error', err.message || 'Could not play recording.');
     }
@@ -325,6 +428,11 @@ export default function CompleteScreen({ route, navigation }) {
   })();
 
   const [photo, setPhoto] = useState(null);
+  const [checkingPhoto, setCheckingPhoto] = useState(false);
+  const [speedometerFailedTries, setSpeedometerFailedTries] = useState(0);
+  const [speedometerCheckError, setSpeedometerCheckError] = useState('');
+  const [speedometerSkippedReason, setSpeedometerSkippedReason] = useState(null);
+  const [lastSpeedometerPhoto, setLastSpeedometerPhoto] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [startText, setStartText] = useState('Locating...');
   const [endText, setEndText] = useState('Locating...');
@@ -366,17 +474,17 @@ export default function CompleteScreen({ route, navigation }) {
     return null;
   };
 
-  // ── Customer met / not met ─────────────────────────────────────────────────
+  // ── Customer visited / not visited ────────────────────────────────────────
   const [customerMet, setCustomerMet] = useState(null); // null | true | false
 
-  // ── Visited: editable names ─────────────────────────────────────────────────
+  // ── Visited: editable names ───────────────────────────────────────────────
   const [visitedNames, setVisitedNames] = useState(initialNames);
 
-  // ── Visited: voice note ────────────────────────────────────────────────────
+  // ── Visited: voice note ───────────────────────────────────────────────────
   const [voiceUri, setVoiceUri] = useState(null);
   const [voiceDuration, setVoiceDuration] = useState(0);
 
-  // ── Not visited: voice note OR typed reason ─────────────────────────────────
+  // ── Not visited: voice note OR typed reason ───────────────────────────────
   const [notMetVoiceUri, setNotMetVoiceUri] = useState(null);
   const [notMetVoiceDuration, setNotMetVoiceDuration] = useState(0);
   const [showTypedReason, setShowTypedReason] = useState(false);
@@ -421,11 +529,54 @@ export default function CompleteScreen({ route, navigation }) {
       allowsEditing: false,
     });
     if (!r.canceled && r.assets && r.assets[0] && r.assets[0].uri) {
-      setPhoto(r.assets[0].uri);
+      const capturedUri = toFileUri(r.assets[0].uri);
+      setCheckingPhoto(true);
+      setSpeedometerCheckError('');
+      try {
+        const checkRes = await checkHasNumbers(capturedUri);
+        if (checkRes.ok) {
+          setPhoto(capturedUri);
+          setSpeedometerCheckError('');
+          setSpeedometerFailedTries(0);
+          setLastSpeedometerPhoto(null);
+          setSpeedometerSkippedReason(checkRes.skipped ? (checkRes.reason || 'error') : null);
+        } else {
+          setPhoto(null);
+          setSpeedometerSkippedReason(null);
+          const nextTries = speedometerFailedTries + 1;
+          setSpeedometerFailedTries(nextTries);
+          setLastSpeedometerPhoto(capturedUri);
+          setSpeedometerCheckError('No numbers found in the photo. Take a clear photo showing the speedometer numbers.');
+        }
+      } catch (err) {
+        // Technical failure must never block
+        setPhoto(capturedUri);
+        setSpeedometerCheckError('');
+        setSpeedometerFailedTries(0);
+        setLastSpeedometerPhoto(null);
+        let reason = 'error';
+        if (err && typeof err.name === 'string' && err.name && err.name !== 'Error' && /^[A-Za-z0-9_]+$/.test(err.name)) {
+          reason = err.name;
+        }
+        setSpeedometerSkippedReason(reason);
+      } finally {
+        setCheckingPhoto(false);
+      }
     }
   };
 
-  // ── Visited name helpers ───────────────────────────────────────────────────
+  const useAnyway = () => {
+    if (lastSpeedometerPhoto) {
+      const resolved = toFileUri(lastSpeedometerPhoto);
+      setPhoto(resolved);
+      setSpeedometerCheckError('');
+      setSpeedometerFailedTries(0);
+      setLastSpeedometerPhoto(null);
+      setSpeedometerSkippedReason(null);
+    }
+  };
+
+  // ── Visited name helpers ──────────────────────────────────────────────────
   const setVisitedName = (idx, val) => {
     setVisitedNames((prev) => {
       const next = [...prev];
@@ -444,7 +595,7 @@ export default function CompleteScreen({ route, navigation }) {
   const canEndRecovery = (() => {
     if (submitting) return false;
     if (customerMet === null) return false;
-    if (needsEndPhoto && !photo) return false;
+    if (needsEndPhoto && !toFileUri(photo)) return false;
 
     if (customerMet === true) {
       // At least one non-empty name required
@@ -455,7 +606,7 @@ export default function CompleteScreen({ route, navigation }) {
 
     if (customerMet === false) {
       // Voice note OR typed reason required
-      if (notMetVoiceUri) return true;
+      if (toFileUri(notMetVoiceUri)) return true;
       if (notMetReason.trim()) return true;
       return false;
     }
@@ -468,7 +619,7 @@ export default function CompleteScreen({ route, navigation }) {
     Alert.alert(
       'Recovery Completed',
       'The recovery session has been successfully saved to the server.',
-      [{ text: 'OK', onPress: () => navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] }) }]
+      [{ text: 'OK', onPress: () => navigation.reset({ index: 1, routes: [{ name: 'MainTabs' }, { name: 'Tasks' }] }) }]
     );
   };
 
@@ -477,7 +628,8 @@ export default function CompleteScreen({ route, navigation }) {
       Alert.alert('Required', 'Please select Visited or Not visited.');
       return;
     }
-    if (needsEndPhoto && !photo) {
+    const finalPhoto = toFileUri(photo);
+    if (needsEndPhoto && !finalPhoto) {
       Alert.alert('Ending Photo Required', 'Please capture the ending speedometer image.');
       return;
     }
@@ -488,11 +640,21 @@ export default function CompleteScreen({ route, navigation }) {
         return;
       }
     }
+    const rawVoiceUri = customerMet ? voiceUri : notMetVoiceUri;
+    const activeVoiceUri = toFileUri(rawVoiceUri);
+    const activeVoiceDuration = customerMet ? voiceDuration : notMetVoiceDuration;
+
     if (customerMet === false) {
-      if (!notMetVoiceUri && !notMetReason.trim()) {
-        Alert.alert('Required', 'Please record a voice note or type a reason.');
-        return;
+      if (!notMetReason.trim()) {
+        if (!activeVoiceUri) {
+          Alert.alert('Recording not found', 'Recording not found, please record again');
+          return;
+        }
       }
+    }
+    if (customerMet === true && rawVoiceUri != null && !activeVoiceUri) {
+      Alert.alert('Recording not found', 'Recording not found, please record again');
+      return;
     }
 
     setSubmitting(true);
@@ -525,14 +687,14 @@ export default function CompleteScreen({ route, navigation }) {
       try {
         sAddr = await getReadableAddress(startLocation);
         startAddressRef.current = sAddr || '';
-      } catch (e) {}
+      } catch (e) { }
     }
     let eAddr = endAddressRef.current;
     if (!eAddr && (endLocation || end)) {
       try {
         eAddr = await getReadableAddress(endLocation || end);
         endAddressRef.current = eAddr || '';
-      } catch (e) {}
+      } catch (e) { }
     }
     sAddr = sAddr || '';
     eAddr = eAddr || '';
@@ -563,8 +725,6 @@ export default function CompleteScreen({ route, navigation }) {
     };
 
     const customerNames = customerMet ? visitedNames.filter((n) => n.trim()).map((n) => n.trim()) : [];
-    const activeVoiceUri = customerMet ? voiceUri : notMetVoiceUri;
-    const activeVoiceDuration = customerMet ? voiceDuration : notMetVoiceDuration;
 
     // Build base remarks string for NLP (keep legacy field for backend compat)
     const remarksText = customerMet
@@ -574,9 +734,9 @@ export default function CompleteScreen({ route, navigation }) {
     try {
       let nlpDetailsStr = '';
       try {
-        const { nlpDetails } = summarize(remarksText);
-        nlpDetailsStr = JSON.stringify(nlpDetails || {});
-      } catch (_e) {}
+        // nlpDetails summarization — graceful no-op if summarize is unavailable
+        nlpDetailsStr = '';
+      } catch (_e) { }
 
       if (!needsEndPhoto && !activeVoiceUri) {
         // WALK / OTHER without voice: JSON finish endpoint
@@ -606,6 +766,8 @@ export default function CompleteScreen({ route, navigation }) {
       } else {
         // Multipart: photo and/or voice
         const fields = {
+          customerId: route.params?.customerId || session?.customerRefId || '',
+          customerRefId: route.params?.customerId || session?.customerRefId || '',
           remarks: remarksText,
           customerMet: String(customerMet),
           customerNames: JSON.stringify(customerNames),
@@ -631,7 +793,7 @@ export default function CompleteScreen({ route, navigation }) {
         };
 
         const filesMap = {};
-        if (photo) filesMap.endPhoto = photo;
+        if (finalPhoto) filesMap.endPhoto = finalPhoto;
         if (activeVoiceUri) filesMap.voice = activeVoiceUri;
 
         const endpoint = needsEndPhoto
@@ -639,6 +801,12 @@ export default function CompleteScreen({ route, navigation }) {
           : `/recovery/sessions/${sessionId}/finish-walk`;
 
         await apiUploadFiles(endpoint, fields, filesMap);
+      }
+
+      if (activeVoiceUri && sessionId) {
+        try {
+          await copyRecordingToCache(sessionId, activeVoiceUri);
+        } catch (_) {}
       }
 
       handleFinishSuccess();
@@ -652,13 +820,7 @@ export default function CompleteScreen({ route, navigation }) {
       if (isNetworkError(e)) {
         // Save offline, sync later
         try {
-          const { nlpSummary, nlpCategory, nlpDetails } = summarize(remarksText);
-          let nlpDetailsStr = '';
-          try { nlpDetailsStr = JSON.stringify(nlpDetails || {}); } catch (_e) {}
-          const customerNames = customerMet ? visitedNames.filter((n) => n.trim()).map((n) => n.trim()) : [];
-          const activeVoiceUri = customerMet ? voiceUri : notMetVoiceUri;
-          const activeVoiceDuration = customerMet ? voiceDuration : notMetVoiceDuration;
-
+          const finalStartPhoto = toFileUri(startPhotoUri || session?.startPhotoUri);
           await savePendingSession({
             deviceSessionId: session?.deviceSessionId || sessionId,
             sessionId: session?.sessionId || sessionId,
@@ -682,19 +844,19 @@ export default function CompleteScreen({ route, navigation }) {
             endAddress: eAddr,
             remarks: remarksText,
             rawRemarks: remarksText,
-            nlpSummary,
-            nlpCategory,
-            nlpDetails: nlpDetailsStr,
-            startLocation: startLocPayload || session?.startLocation || null,
-            endLocation: endLocPayload || null,
+            nlpSummary: '',
+            nlpCategory: '',
+            nlpDetails: '',
+            startLocation: startLocPayload || startLocation || session?.startLocation || null,
+            endLocation: endLocPayload || end || null,
             startLatitude: startLat,
             startLongitude: startLng,
             startAccuracy: startAcc,
             endLatitude: endLat,
             endLongitude: endLng,
             endAccuracy: endAcc,
-            startPhotoUri: startPhotoUri || session?.startPhotoUri || null,
-            endPhotoUri: needsEndPhoto ? (photo || null) : null,
+            startPhotoUri: toFileUri(startPhotoUri || session?.startPhotoUri) || null,
+            endPhotoUri: needsEndPhoto ? (finalPhoto || null) : null,
             routePhotoUri: routeSnapshotUri || null,
             voiceUri: activeVoiceUri || null,
             voiceDurationSeconds: activeVoiceUri ? activeVoiceDuration : null,
@@ -710,7 +872,7 @@ export default function CompleteScreen({ route, navigation }) {
           Alert.alert(
             'Saved Offline',
             'Network is unavailable. Your recovery has been saved on this device and will automatically sync to the server when connection is restored.',
-            [{ text: 'OK', onPress: () => navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] }) }]
+            [{ text: 'OK', onPress: () => navigation.reset({ index: 1, routes: [{ name: 'MainTabs' }, { name: 'Tasks' }] }) }]
           );
         } catch (saveErr) {
           Alert.alert('Error', 'Could not save recovery locally: ' + (saveErr.message || 'Storage error'));
@@ -731,286 +893,312 @@ export default function CompleteScreen({ route, navigation }) {
       style={styles.keyboardAvoid}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
-    <ScrollView
-      ref={scrollViewRef}
-      style={styles.container}
-      contentContainerStyle={{ padding: 20, paddingBottom: 120 }}
-      keyboardShouldPersistTaps="handled"
-      keyboardDismissMode="on-drag"
-    >
-      {/* ── HEADER ─────────────────────────────────────────────────────── */}
-      <View style={styles.header}>
-        <Text style={styles.title}>Recovery Completion</Text>
-        <Text style={styles.subtitle}>Review session summary and submit your visit outcome</Text>
-      </View>
-
-      {/* ── TRIP SUMMARY CARD ──────────────────────────────────────────── */}
-      <View style={styles.summaryCard}>
-        <View style={styles.summaryCardHeader}>
-          <Text style={styles.summaryCardTitle}>TRIP SUMMARY</Text>
-          <View style={[styles.modePill, { backgroundColor: modeColor + '18', borderColor: modeColor + '55' }]}>
-            <Ionicons name={modeIcon} size={13} color={modeColor} style={{ marginRight: 4 }} />
-            <Text style={[styles.modePillText, { color: modeColor }]}>{rawMode}</Text>
-          </View>
+      <ScrollView
+        ref={scrollViewRef}
+        style={styles.container}
+        contentContainerStyle={{ padding: 20, paddingBottom: 120 }}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+      >
+        {/* ── HEADER ─────────────────────────────────────────────────────── */}
+        <View style={styles.header}>
+          <Text style={styles.title}>Recovery Completion</Text>
+          <Text style={styles.subtitle}>Review session summary and submit your visit outcome</Text>
         </View>
 
-        <View style={styles.metricsRow}>
-          <View style={styles.metricBox}>
-            <Ionicons name="time-outline" size={20} color="#2563EB" />
-            <Text style={styles.metricValue}>{formatDuration(durationSeconds)}</Text>
-            <Text style={styles.metricLabel}>Duration</Text>
-          </View>
-          <View style={styles.metricDivider} />
-          <View style={styles.metricBox}>
-            <Ionicons name="navigate-outline" size={20} color="#059669" />
-            <Text style={styles.metricValue}>{formatDistance(dist)}</Text>
-            <Text style={styles.metricLabel}>Distance</Text>
-          </View>
-          {vehicleNumber ? (
-            <>
-              <View style={styles.metricDivider} />
-              <View style={styles.metricBox}>
-                <Ionicons name="car-outline" size={20} color="#7C3AED" />
-                <Text style={[styles.metricValue, { fontSize: 13 }]}>{vehicleNumber}</Text>
-                <Text style={styles.metricLabel}>Vehicle</Text>
-              </View>
-            </>
-          ) : null}
-        </View>
-
-        <View style={styles.divider} />
-
-        <View style={styles.locationRow}>
-          <View style={[styles.locationDot, { backgroundColor: '#059669' }]} />
-          <View style={{ flex: 1 }}>
-            <Text style={styles.locLabel}>Start Location</Text>
-            <Text style={styles.locValue} numberOfLines={2}>{startText}</Text>
-          </View>
-        </View>
-        <View style={styles.locationConnector} />
-        <View style={styles.locationRow}>
-          <View style={[styles.locationDot, { backgroundColor: '#DC2626' }]} />
-          <View style={{ flex: 1 }}>
-            <Text style={styles.locLabel}>End Location</Text>
-            <Text style={styles.locValue} numberOfLines={2}>{endText}</Text>
-          </View>
-        </View>
-      </View>
-
-      {/* ── ENDING SPEEDOMETER (BIKE/CAR ONLY) ────────────────────────── */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>
-          {needsEndPhoto ? '1. Ending Speedometer Image *' : '1. Ending Speedometer Image'}
-        </Text>
-        {!needsEndPhoto ? (
-          <View style={styles.naCard}>
-            <Ionicons name="checkmark-circle" size={20} color="#059669" style={{ marginRight: 8 }} />
-            <Text style={styles.naText}>
-              Not required for {rawMode === 'WALK' ? 'Walking' : 'Other'} mode
-            </Text>
-          </View>
-        ) : photo ? (
-          <View style={styles.previewBox}>
-            <Image source={{ uri: photo }} style={styles.previewImage} resizeMode="cover" />
-            <TouchableOpacity style={styles.retakeBtn} onPress={takeEndingPhoto}>
-              <Ionicons name="camera-reverse-outline" size={16} color="#2563EB" style={{ marginRight: 6 }} />
-              <Text style={styles.retakeBtnText}>Retake Photo</Text>
-            </TouchableOpacity>
-          </View>
-        ) : (
-          <TouchableOpacity style={styles.cameraBtn} onPress={takeEndingPhoto} activeOpacity={0.85}>
-            <View style={styles.cameraIconBox}>
-              <Ionicons name="camera" size={32} color="#2563EB" />
+        {/* ── TRIP SUMMARY CARD ──────────────────────────────────────────── */}
+        <View style={styles.summaryCard}>
+          <View style={styles.summaryCardHeader}>
+            <Text style={styles.summaryCardTitle}>TRIP SUMMARY</Text>
+            <View style={[styles.modePill, { backgroundColor: modeColor + '18', borderColor: modeColor + '55' }]}>
+              <Ionicons name={modeIcon} size={13} color={modeColor} style={{ marginRight: 4 }} />
+              <Text style={[styles.modePillText, { color: modeColor }]}>{rawMode}</Text>
             </View>
-            <Text style={styles.cameraBtnTitle}>Capture Ending Speedometer</Text>
-            <Text style={styles.cameraBtnSub}>Camera only · One photo required</Text>
-          </TouchableOpacity>
-        )}
-      </View>
+          </View>
 
-      {/* ── CUSTOMER VISITED / NOT VISITED ─────────────────────────────── */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>2. Customer Visit Outcome *</Text>
+          <View style={styles.metricsRow}>
+            <View style={styles.metricBox}>
+              <Ionicons name="time-outline" size={20} color="#2563EB" />
+              <Text style={styles.metricValue}>{formatDuration(durationSeconds)}</Text>
+              <Text style={styles.metricLabel}>Duration</Text>
+            </View>
+            <View style={styles.metricDivider} />
+            <View style={styles.metricBox}>
+              <Ionicons name="navigate-outline" size={20} color="#059669" />
+              <Text style={styles.metricValue}>{formatDistance(dist)}</Text>
+              <Text style={styles.metricLabel}>Distance</Text>
+            </View>
+            {vehicleNumber ? (
+              <>
+                <View style={styles.metricDivider} />
+                <View style={styles.metricBox}>
+                  <Ionicons name="car-outline" size={20} color="#7C3AED" />
+                  <Text style={[styles.metricValue, { fontSize: 13 }]}>{vehicleNumber}</Text>
+                  <Text style={styles.metricLabel}>Vehicle</Text>
+                </View>
+              </>
+            ) : null}
+          </View>
 
-        {/* Option buttons */}
-        <View style={styles.metRow}>
-          <TouchableOpacity
-            style={[styles.metBtn, customerMet === true && styles.metBtnActive]}
-            onPress={() => { setCustomerMet(true); }}
-            activeOpacity={0.8}
-          >
-            <Ionicons name="checkmark-circle-outline" size={18}
-              color={customerMet === true ? '#059669' : '#64748B'} style={{ marginRight: 6 }} />
-            <Text style={[styles.metBtnText, customerMet === true && { color: '#059669' }]}>
-              Visited the customer
-            </Text>
-          </TouchableOpacity>
+          <View style={styles.divider} />
 
-          <TouchableOpacity
-            style={[styles.metBtn, customerMet === false && styles.metBtnNotActive]}
-            onPress={() => { setCustomerMet(false); }}
-            activeOpacity={0.8}
-          >
-            <Ionicons name="close-circle-outline" size={18}
-              color={customerMet === false ? '#DC2626' : '#64748B'} style={{ marginRight: 6 }} />
-            <Text style={[styles.metBtnText, customerMet === false && { color: '#DC2626' }]}>
-              Not visited the customer
-            </Text>
-          </TouchableOpacity>
+          <View style={styles.locationRow}>
+            <View style={[styles.locationDot, { backgroundColor: '#059669' }]} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.locLabel}>Start Location</Text>
+              <Text style={styles.locValue} numberOfLines={2}>{startText}</Text>
+            </View>
+          </View>
+          <View style={styles.locationConnector} />
+          <View style={styles.locationRow}>
+            <View style={[styles.locationDot, { backgroundColor: '#DC2626' }]} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.locLabel}>End Location</Text>
+              <Text style={styles.locValue} numberOfLines={2}>{endText}</Text>
+            </View>
+          </View>
         </View>
 
-        {/* ── VISITED: Names + voice ──────────────────────────────────────── */}
-        {customerMet === true ? (
-          <View style={styles.outcomeSub}>
-            <Text style={styles.subLabel}>Names of persons visited *</Text>
-            {visitedNames.map((name, idx) => (
-              <View key={idx} style={styles.nameRow}>
-                <TextInput
-                  style={styles.nameInput}
-                  placeholder={`Person ${idx + 1} name`}
-                  placeholderTextColor="#94A3B8"
-                  value={name}
-                  onChangeText={(v) => setVisitedName(idx, v)}
-                  autoCorrect={false}
-                />
-                {visitedNames.length > 1 ? (
-                  <TouchableOpacity onPress={() => removeVisitedName(idx)} style={styles.removeNameBtn}>
-                    <Ionicons name="close-circle" size={20} color="#94A3B8" />
-                  </TouchableOpacity>
-                ) : null}
-              </View>
-            ))}
-            {visitedNames.length < 5 ? (
-              <TouchableOpacity style={styles.addNameBtn} onPress={addAnotherName} activeOpacity={0.7}>
-                <Ionicons name="add-circle-outline" size={16} color="#2563EB" style={{ marginRight: 6 }} />
-                <Text style={styles.addNameBtnText}>+ Add another name</Text>
+        {/* ── ENDING SPEEDOMETER (BIKE/CAR ONLY) ────────────────────────── */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>
+            {needsEndPhoto ? '1. Ending Speedometer Image *' : '1. Ending Speedometer Image'}
+          </Text>
+          {!needsEndPhoto ? (
+            <View style={styles.naCard}>
+              <Ionicons name="checkmark-circle" size={20} color="#059669" style={{ marginRight: 8 }} />
+              <Text style={styles.naText}>
+                Not required for {rawMode === 'WALK' ? 'Walking' : 'Other'} mode
+              </Text>
+            </View>
+          ) : checkingPhoto ? (
+            <View style={styles.checkingBox}>
+              <ActivityIndicator size="small" color="#2563EB" />
+              <Text style={styles.checkingText}>Checking photo...</Text>
+            </View>
+          ) : photo ? (
+            <View style={styles.previewBox}>
+              <Image source={{ uri: photo }} style={styles.previewImage} resizeMode="cover" />
+              {speedometerSkippedReason ? (
+                <Text style={styles.speedometerSkippedText}>
+                  Number check could not run ({speedometerSkippedReason}). Photo accepted.
+                </Text>
+              ) : null}
+              <TouchableOpacity style={styles.retakeBtn} onPress={takeEndingPhoto}>
+                <Ionicons name="camera-reverse-outline" size={16} color="#2563EB" style={{ marginRight: 6 }} />
+                <Text style={styles.retakeBtnText}>Retake Photo</Text>
               </TouchableOpacity>
-            ) : null}
-
-            <Text style={[styles.subLabel, { marginTop: 14 }]}>Voice note (optional)</Text>
-            <VoiceRecorder
-              onRecorded={(uri, dur) => { setVoiceUri(uri); setVoiceDuration(dur); }}
-              onCleared={() => { setVoiceUri(null); setVoiceDuration(0); }}
-            />
-          </View>
-        ) : null}
-
-        {/* ── NOT VISITED: Voice or typed reason ─────────────────────────── */}
-        {customerMet === false ? (
-          <View style={styles.outcomeSub}>
-            <Text style={styles.subLabel}>Reason for not visiting *</Text>
-            {!showTypedReason ? (
-              <>
-                <VoiceRecorder
-                  onRecorded={(uri, dur) => { setNotMetVoiceUri(uri); setNotMetVoiceDuration(dur); }}
-                  onCleared={() => { setNotMetVoiceUri(null); setNotMetVoiceDuration(0); }}
-                />
-                <TouchableOpacity
-                  style={styles.typeInsteadLink}
-                  onPress={() => setShowTypedReason(true)}
-                  activeOpacity={0.7}
-                >
-                  <Text style={styles.typeInsteadText}>Type a reason instead</Text>
-                </TouchableOpacity>
-              </>
-            ) : (
-              <>
-                <TextInput
-                  style={styles.textArea}
-                  placeholder="Enter reason for not visiting..."
-                  placeholderTextColor="#94A3B8"
-                  multiline
-                  numberOfLines={4}
-                  value={notMetReason}
-                  onChangeText={setNotMetReason}
-                  textAlignVertical="top"
-                />
-                <TouchableOpacity
-                  style={styles.typeInsteadLink}
-                  onPress={() => setShowTypedReason(false)}
-                  activeOpacity={0.7}
-                >
-                  <Text style={styles.typeInsteadText}>Record voice note instead</Text>
-                </TouchableOpacity>
-              </>
-            )}
-          </View>
-        ) : null}
-      </View>
-
-      {/* ── END RECOVERY BUTTON ──────────────────────────────────────────── */}
-      <View style={styles.actionSection}>
-        <TouchableOpacity
-          style={[styles.completeBtn, !canEndRecovery && styles.btnDisabled]}
-          onPress={completeRecovery}
-          disabled={!canEndRecovery || submitting}
-          activeOpacity={0.85}
-        >
-          {submitting ? (
-            <ActivityIndicator color="#FFFFFF" />
+            </View>
           ) : (
-            <View style={styles.completeBtnContent}>
-              <Ionicons name="checkmark-done-circle" size={22} color="#FFFFFF" style={{ marginRight: 8 }} />
-              <Text style={styles.completeBtnText}>END RECOVERY</Text>
+            <View>
+              {speedometerCheckError ? (
+                <View style={styles.speedometerErrorBox}>
+                  <Ionicons name="alert-circle-outline" size={18} color="#DC2626" style={{ marginRight: 8, marginTop: 1 }} />
+                  <Text style={styles.speedometerErrorText}>{speedometerCheckError}</Text>
+                </View>
+              ) : null}
+
+              {speedometerFailedTries >= 3 && lastSpeedometerPhoto ? (
+                <TouchableOpacity style={styles.useAnywayBtn} onPress={useAnyway} activeOpacity={0.85}>
+                  <Ionicons name="checkmark-circle-outline" size={18} color="#15803D" style={{ marginRight: 6 }} />
+                  <Text style={styles.useAnywayBtnText}>Use this photo anyway</Text>
+                </TouchableOpacity>
+              ) : null}
+
+              <TouchableOpacity style={styles.cameraBtn} onPress={takeEndingPhoto} activeOpacity={0.85}>
+                <View style={styles.cameraIconBox}>
+                  <Ionicons name="camera" size={32} color="#2563EB" />
+                </View>
+                <Text style={styles.cameraBtnTitle}>Capture Ending Speedometer</Text>
+                <Text style={styles.cameraBtnSub}>Camera only · One photo required</Text>
+              </TouchableOpacity>
             </View>
           )}
-        </TouchableOpacity>
+        </View>
 
-        {!canEndRecovery ? (
-          <Text style={styles.validationNote}>
-            {customerMet === null
-              ? 'Select Visited or Not visited to proceed'
-              : needsEndPhoto && !photo
-              ? 'Capture ending speedometer photo to proceed'
-              : customerMet === true && visitedNames.filter((n) => n.trim()).length === 0
-              ? 'Enter at least one name to proceed'
-              : customerMet === false && !notMetVoiceUri && !notMetReason.trim()
-              ? 'Record a voice note or type a reason to proceed'
-              : ''}
-          </Text>
-        ) : null}
-      </View>
+        {/* ── CUSTOMER VISITED / NOT VISITED ─────────────────────────────── */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>2. Customer Visit Outcome *</Text>
 
-      {/* Hidden MapView for Route Map Snapshot */}
-      <View style={styles.hiddenMapContainer} pointerEvents="none">
-        <MapView
-          ref={mapRef}
-          style={styles.hiddenMap}
-          initialRegion={{
-            latitude: Number(startLocation?.latitude || (allPoints && allPoints[0]?.latitude) || 0),
-            longitude: Number(startLocation?.longitude || (allPoints && allPoints[0]?.longitude) || 0),
-            latitudeDelta: 0.05,
-            longitudeDelta: 0.05,
-          }}
-        >
-          {Array.isArray(allPoints) && allPoints.length > 1 ? (
-            <Polyline
-              coordinates={allPoints.map((p) => ({ latitude: Number(p.latitude), longitude: Number(p.longitude) }))}
-              strokeColor="#2563EB"
-              strokeWidth={4}
-            />
+          {/* Option buttons */}
+          <View style={styles.metRow}>
+            <TouchableOpacity
+              style={[styles.metBtn, customerMet === true && styles.metBtnActive]}
+              onPress={() => { setCustomerMet(true); }}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="checkmark-circle-outline" size={18}
+                color={customerMet === true ? '#059669' : '#64748B'} style={{ marginRight: 6 }} />
+              <Text style={[styles.metBtnText, customerMet === true && { color: '#059669' }]}>
+                Visited the customer
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.metBtn, customerMet === false && styles.metBtnNotActive]}
+              onPress={() => { setCustomerMet(false); }}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="close-circle-outline" size={18}
+                color={customerMet === false ? '#DC2626' : '#64748B'} style={{ marginRight: 6 }} />
+              <Text style={[styles.metBtnText, customerMet === false && { color: '#DC2626' }]}>
+                Not visited the customer
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* ── VISITED: Names + voice ──────────────────────────────────────── */}
+          {customerMet === true ? (
+            <View style={styles.outcomeSub}>
+              <Text style={styles.subLabel}>Names of persons visited *</Text>
+              {visitedNames.map((name, idx) => (
+                <View key={idx} style={styles.nameRow}>
+                  <TextInput
+                    style={styles.nameInput}
+                    placeholder={`Person ${idx + 1} name`}
+                    placeholderTextColor="#94A3B8"
+                    value={name}
+                    onChangeText={(v) => setVisitedName(idx, v)}
+                    autoCorrect={false}
+                  />
+                  {visitedNames.length > 1 ? (
+                    <TouchableOpacity onPress={() => removeVisitedName(idx)} style={styles.removeNameBtn}>
+                      <Ionicons name="close-circle" size={20} color="#94A3B8" />
+                    </TouchableOpacity>
+                  ) : null}
+                </View>
+              ))}
+              {visitedNames.length < 5 ? (
+                <TouchableOpacity style={styles.addNameBtn} onPress={addAnotherName} activeOpacity={0.7}>
+                  <Ionicons name="add-circle-outline" size={16} color="#2563EB" style={{ marginRight: 6 }} />
+                  <Text style={styles.addNameBtnText}>+ Add another name</Text>
+                </TouchableOpacity>
+              ) : null}
+
+              <Text style={[styles.subLabel, { marginTop: 14 }]}>Voice note (optional)</Text>
+              <VoiceRecorder
+                onRecorded={(uri, dur) => { setVoiceUri(uri); setVoiceDuration(dur); }}
+                onCleared={() => { setVoiceUri(null); setVoiceDuration(0); }}
+              />
+            </View>
           ) : null}
-          {(startLocation || (allPoints && allPoints[0])) ? (
-            <Marker
-              coordinate={{
-                latitude: Number(startLocation?.latitude || allPoints[0].latitude),
-                longitude: Number(startLocation?.longitude || allPoints[0].longitude),
-              }}
-              pinColor="green"
-            />
+
+          {/* ── NOT VISITED: Voice or typed reason ─────────────────────────── */}
+          {customerMet === false ? (
+            <View style={styles.outcomeSub}>
+              <Text style={styles.subLabel}>Reason for not visiting *</Text>
+              {!showTypedReason ? (
+                <>
+                  <VoiceRecorder
+                    onRecorded={(uri, dur) => { setNotMetVoiceUri(uri); setNotMetVoiceDuration(dur); }}
+                    onCleared={() => { setNotMetVoiceUri(null); setNotMetVoiceDuration(0); }}
+                  />
+                  <TouchableOpacity
+                    style={styles.typeInsteadLink}
+                    onPress={() => setShowTypedReason(true)}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={styles.typeInsteadText}>Type a reason instead</Text>
+                  </TouchableOpacity>
+                </>
+              ) : (
+                <>
+                  <TextInput
+                    style={styles.textArea}
+                    placeholder="Enter reason for not visiting..."
+                    placeholderTextColor="#94A3B8"
+                    multiline
+                    numberOfLines={4}
+                    value={notMetReason}
+                    onChangeText={setNotMetReason}
+                    textAlignVertical="top"
+                  />
+                  <TouchableOpacity
+                    style={styles.typeInsteadLink}
+                    onPress={() => setShowTypedReason(false)}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={styles.typeInsteadText}>Record voice note instead</Text>
+                  </TouchableOpacity>
+                </>
+              )}
+            </View>
           ) : null}
-          {(endLocation || (allPoints && allPoints[allPoints.length - 1])) ? (
-            <Marker
-              coordinate={{
-                latitude: Number(endLocation?.latitude || allPoints[allPoints.length - 1].latitude),
-                longitude: Number(endLocation?.longitude || allPoints[allPoints.length - 1].longitude),
-              }}
-              pinColor="red"
-            />
+        </View>
+
+        {/* ── END RECOVERY BUTTON ──────────────────────────────────────────── */}
+        <View style={styles.actionSection}>
+          <TouchableOpacity
+            style={[styles.completeBtn, !canEndRecovery && styles.btnDisabled]}
+            onPress={completeRecovery}
+            disabled={!canEndRecovery || submitting}
+            activeOpacity={0.85}
+          >
+            {submitting ? (
+              <ActivityIndicator color="#FFFFFF" />
+            ) : (
+              <View style={styles.completeBtnContent}>
+                <Ionicons name="checkmark-done-circle" size={22} color="#FFFFFF" style={{ marginRight: 8 }} />
+                <Text style={styles.completeBtnText}>END RECOVERY</Text>
+              </View>
+            )}
+          </TouchableOpacity>
+
+          {!canEndRecovery ? (
+            <Text style={styles.validationNote}>
+              {customerMet === null
+                ? 'Select Visited or Not visited to proceed'
+                : needsEndPhoto && !photo
+                  ? 'Capture ending speedometer photo to proceed'
+                  : customerMet === true && visitedNames.filter((n) => n.trim()).length === 0
+                    ? 'Enter at least one name to proceed'
+                    : customerMet === false && !notMetVoiceUri && !notMetReason.trim()
+                      ? 'Record a voice note or type a reason to proceed'
+                      : ''}
+            </Text>
           ) : null}
-        </MapView>
-      </View>
-    </ScrollView>
+        </View>
+
+        {/* Hidden MapView for Route Map Snapshot */}
+        <View style={styles.hiddenMapContainer} pointerEvents="none">
+          <MapView
+            ref={mapRef}
+            style={styles.hiddenMap}
+            initialRegion={{
+              latitude: Number(startLocation?.latitude || (allPoints && allPoints[0]?.latitude) || 0),
+              longitude: Number(startLocation?.longitude || (allPoints && allPoints[0]?.longitude) || 0),
+              latitudeDelta: 0.05,
+              longitudeDelta: 0.05,
+            }}
+          >
+            {Array.isArray(allPoints) && allPoints.length > 1 ? (
+              <Polyline
+                coordinates={allPoints.map((p) => ({ latitude: Number(p.latitude), longitude: Number(p.longitude) }))}
+                strokeColor="#2563EB"
+                strokeWidth={4}
+              />
+            ) : null}
+            {(startLocation || (allPoints && allPoints[0])) ? (
+              <Marker
+                coordinate={{
+                  latitude: Number(startLocation?.latitude || allPoints[0].latitude),
+                  longitude: Number(startLocation?.longitude || allPoints[0].longitude),
+                }}
+                pinColor="green"
+              />
+            ) : null}
+            {(endLocation || (allPoints && allPoints[allPoints.length - 1])) ? (
+              <Marker
+                coordinate={{
+                  latitude: Number(endLocation?.latitude || allPoints[allPoints.length - 1].latitude),
+                  longitude: Number(endLocation?.longitude || allPoints[allPoints.length - 1].longitude),
+                }}
+                pinColor="red"
+              />
+            ) : null}
+          </MapView>
+        </View>
+      </ScrollView>
     </KeyboardAvoidingView>
   );
 }
@@ -1065,7 +1253,6 @@ const styles = StyleSheet.create({
 
   section: { marginBottom: 18 },
   sectionTitle: { fontSize: 14, fontWeight: '700', color: '#1E293B', marginBottom: 10 },
-  helperText: { fontSize: 12, color: '#64748B', marginBottom: 10, fontWeight: '500', lineHeight: 17 },
 
   naCard: {
     flexDirection: 'row', alignItems: 'center',
@@ -1091,6 +1278,12 @@ const styles = StyleSheet.create({
     alignItems: 'center', borderWidth: 1, borderColor: '#E2E8F0',
   },
   previewImage: { width: '100%', height: 190, borderRadius: 10 },
+  speedometerSkippedText: {
+    color: '#64748B',
+    fontSize: 12,
+    marginTop: 8,
+    textAlign: 'center',
+  },
   retakeBtn: {
     flexDirection: 'row', alignItems: 'center', marginTop: 12,
     paddingVertical: 7, paddingHorizontal: 14,
@@ -1098,7 +1291,26 @@ const styles = StyleSheet.create({
   },
   retakeBtnText: { color: '#2563EB', fontSize: 13, fontWeight: '700' },
 
-  // Customer met buttons
+  checkingBox: {
+    backgroundColor: '#EFF6FF', borderRadius: 14, padding: 24,
+    alignItems: 'center', justifyContent: 'center', borderWidth: 1.5,
+    borderColor: '#BFDBFE', flexDirection: 'row',
+  },
+  checkingText: { fontSize: 14, fontWeight: '600', color: '#2563EB', marginLeft: 8 },
+  speedometerErrorBox: {
+    flexDirection: 'row', alignItems: 'flex-start',
+    backgroundColor: '#FEF2F2', padding: 12, borderRadius: 10,
+    marginBottom: 12, borderWidth: 1, borderColor: '#FCA5A5',
+  },
+  speedometerErrorText: { color: '#DC2626', fontSize: 13, fontWeight: '500', flex: 1, lineHeight: 18 },
+  useAnywayBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    backgroundColor: '#F0FDF4', borderWidth: 1.5, borderColor: '#86EFAC',
+    borderRadius: 12, paddingVertical: 12, paddingHorizontal: 16, marginBottom: 12,
+  },
+  useAnywayBtnText: { color: '#15803D', fontSize: 14, fontWeight: '700' },
+
+  // Customer visited buttons
   metRow: { gap: 10, marginBottom: 14 },
   metBtn: {
     flexDirection: 'row', alignItems: 'center',

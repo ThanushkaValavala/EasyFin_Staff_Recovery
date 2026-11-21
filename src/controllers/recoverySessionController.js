@@ -693,7 +693,8 @@ exports.getJourneyDetails = async (req, res) => {
   const { RecoverySession, TrackingPoint, StopEvent, Assignment, Evidence } = req.models || {};
   try {
     const { sessionId } = req.params;
-    const staffId = req.staff._id.toString();
+    const agentId = (req.agent && req.agent._id) || (req.staff && req.staff._id);
+    const staffId = agentId ? agentId.toString() : '';
 
     let session;
     let points;
@@ -701,7 +702,10 @@ exports.getJourneyDetails = async (req, res) => {
     let evidences;
 
     if (req.models || getIsConnected()) {
-      session = await RecoverySession.findOne({ sessionId, staffId });
+      session = await RecoverySession.findOne({
+        sessionId,
+        $or: [{ agentId }, { staffId }]
+      });
 
       if (!session) {
         return res.status(404).json({
@@ -710,11 +714,15 @@ exports.getJourneyDetails = async (req, res) => {
         });
       }
 
-      points = await TrackingPoint.find({ sessionId, staffId })
-        .sort({ timestamp: 1 });
+      points = await TrackingPoint.find({
+        sessionId,
+        $or: [{ agentId }, { staffId }]
+      }).sort({ timestamp: 1 });
 
-      stops = await StopEvent.find({ sessionId, staffId })
-        .sort({ startTime: 1 });
+      stops = await StopEvent.find({
+        sessionId,
+        $or: [{ agentId }, { staffId }]
+      }).sort({ startTime: 1 });
 
       evidences = await Evidence.find({ sessionId })
         .sort({ capturedAt: 1 });

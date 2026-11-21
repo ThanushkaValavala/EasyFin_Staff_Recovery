@@ -29,13 +29,20 @@ upload.safeFields = (fields) => (req, res, next) =>
   });
 
 // Second multer instance that also accepts an optional voice file
+const AUDIO_EXTS = ['.m4a', '.mp4', '.aac', '.mp3', '.wav', '.caf'];
+
 const uploadWithVoice = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB overall; individual file checked in middleware
   fileFilter(req, file, cb) {
     if (file.fieldname === 'voice') {
       // audio only, max 5 MB enforced below
-      if (!file.mimetype.startsWith('audio/')) {
+      const isAudio =
+        (file.mimetype && file.mimetype.startsWith('audio/')) ||
+        ((!file.mimetype || file.mimetype === 'application/octet-stream') &&
+          AUDIO_EXTS.some((ext) => (file.originalname || '').toLowerCase().endsWith(ext)));
+
+      if (!isAudio) {
         return cb(new Error('Voice file must be an audio file.'), false);
       }
       return cb(null, true);

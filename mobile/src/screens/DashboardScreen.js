@@ -13,7 +13,7 @@ import { syncPendingSessions } from '../utils/offlineStore';
 export default function DashboardScreen({ navigation }) {
   const insets = useSafeAreaInsets();
   const [staff, setStaff] = useState(null);
-  const [assignments, setAssignments] = useState([]);
+  const [tasksList, setTasksList] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
@@ -32,28 +32,21 @@ export default function DashboardScreen({ navigation }) {
           await SecureStore.setItemAsync('staff', JSON.stringify(profRes.staff));
         }
       } catch (pe) {
-        // Profile fetch failed — use cached staff (already set above)
         console.warn('[Dashboard] Profile fetch error:', pe.message);
       }
 
-      // Fetch actual assignments from the backend
+      // Fetch tasks list and count
       try {
-        const data = await apiGet('/assignments');
-        if (data && data.cases) {
-          setAssignments(data.cases);
-        } else if (data && data.assignments) {
-          setAssignments(data.assignments);
-        } else if (Array.isArray(data)) {
-          setAssignments(data);
+        const data = await apiGet('/tasks/assigned');
+        if (data && data.tasks) {
+          setTasksList(data.tasks);
         }
       } catch (e) {
-        console.warn('[Dashboard] /assignments fetch error:', e.message);
+        console.warn('[Dashboard] /tasks/assigned fetch error:', e.message);
         try {
-          const fallback = await apiGet('/cases');
-          if (fallback && fallback.cases) setAssignments(fallback.cases);
-        } catch (err2) {
-          console.warn('[Dashboard] /cases fetch error:', err2.message);
-        }
+          const fallback = await apiGet('/assignments');
+          if (fallback && fallback.cases) setTasksList(fallback.cases);
+        } catch (_) {}
       }
 
       // Trigger background sync of any pending offline recoveries
@@ -113,88 +106,40 @@ export default function DashboardScreen({ navigation }) {
       ) : null}
 
       {/* ═════════════════════════════════════════════════════════════════════ */}
-      {/* CARD 1: ASSIGNED TASKS (DISPLAY ONLY - NOT CLICKABLE)                 */}
+      {/* CARD 1: TASKS (CLICKABLE → GOES TO TASKS SCREEN)                     */}
       {/* ═════════════════════════════════════════════════════════════════════ */}
-      <View style={[styles.card, styles.cardAssigned]}>
+      <TouchableOpacity
+        style={[styles.card, styles.cardTasks]}
+        onPress={() => navigation.navigate('Tasks')}
+        activeOpacity={0.88}
+      >
         <View style={styles.cardHeader}>
           <View style={styles.cardTitleRow}>
-            <View style={[styles.iconBg, { backgroundColor: '#EFF6FF' }]}>
-              <Ionicons name="briefcase" size={24} color="#2563EB" />
+            <View style={[styles.iconBg, { backgroundColor: '#F5F3FF' }]}>
+              <Ionicons name="checkbox" size={26} color="#7C3AED" />
             </View>
-            <View style={{ marginLeft: 12, flex: 1, minWidth: 0 }}>
-              <Text style={styles.cardTitle}>Assigned Tasks</Text>
-              <Text style={styles.cardSub}>Customer recovery cases assigned to you</Text>
+            <View style={{ marginLeft: 14, flex: 1, minWidth: 0 }}>
+              <Text style={styles.cardTitle}>Tasks</Text>
+              <Text style={styles.cardSub}>Customer recovery cases, location filters & completions</Text>
             </View>
           </View>
-          <View style={{ flexShrink: 0, marginLeft: 8 }}>
-            <View style={styles.badgeViewOnly}>
-              <Text style={styles.badgeViewOnlyText}>DISPLAY ONLY</Text>
+          <View style={{ flexShrink: 0 }}>
+            <View style={[styles.actionIconBg, { backgroundColor: '#EDE9FE' }]}>
+              <Ionicons name="arrow-forward" size={20} color="#7C3AED" />
             </View>
           </View>
         </View>
 
-        {assignments.length === 0 ? (
-          <View style={styles.emptyState}>
-            <Ionicons name="file-tray-outline" size={36} color="#94A3B8" />
-            <Text style={styles.emptyStateText}>No assigned cases currently.</Text>
+        <View style={styles.tasksSummaryRow}>
+          <View style={styles.tasksSummaryPill}>
+            <Ionicons name="clipboard" size={13} color="#7C3AED" style={{ marginRight: 5 }} />
+            <Text style={styles.tasksSummaryPillText}>
+              {tasksList.length} Assigned Task{tasksList.length === 1 ? '' : 's'}
+            </Text>
           </View>
-        ) : (
-          <View style={styles.assignmentsList}>
-            {assignments.map((item, index) => {
-              const cust = item.customer || item.customerId || {};
-              const loan = item.loan || item.loanId || {};
-              const status = item.recoveryStatus || 'PENDING';
-
-              return (
-                <View key={item._id || item.assignmentId || index} style={styles.taskItem}>
-                  <View style={styles.taskItemHeader}>
-                    <Text style={styles.customerName}>{cust.name || 'Customer'}</Text>
-                    <View style={styles.statusPill}>
-                      <Text style={styles.statusText}>{status}</Text>
-                    </View>
-                  </View>
-
-                  <View style={styles.taskDetailRow}>
-                    <Ionicons name="call-outline" size={14} color="#64748B" style={styles.detailIcon} />
-                    <Text style={styles.detailText}>{cust.phone || cust.mobileNumber || '—'}</Text>
-                  </View>
-
-                  <View style={styles.taskDetailRow}>
-                    <Ionicons name="document-text-outline" size={14} color="#64748B" style={styles.detailIcon} />
-                    <Text style={styles.detailText}>Loan A/C: {loan.accountNumber || loan.loanId || '—'}</Text>
-                  </View>
-
-                  <View style={styles.financialRow}>
-                    <View style={styles.financialCol}>
-                      <Text style={styles.financialLabel}>Loan Amount</Text>
-                      <Text style={styles.financialValue}>₹{Number(loan.totalAmount || loan.loanAmount || 0).toLocaleString()}</Text>
-                    </View>
-                    <View style={styles.financialCol}>
-                      <Text style={styles.financialLabel}>Outstanding</Text>
-                      <Text style={[styles.financialValue, { color: '#DC2626' }]}>
-                        ₹{Number(loan.outstandingAmount || 0).toLocaleString()}
-                      </Text>
-                    </View>
-                    <View style={styles.financialCol}>
-                      <Text style={styles.financialLabel}>Due Amount</Text>
-                      <Text style={[styles.financialValue, { color: '#B45309' }]}>
-                        ₹{Number(loan.dueAmount || loan.emiAmount || 0).toLocaleString()}
-                      </Text>
-                    </View>
-                  </View>
-
-                  {cust.address ? (
-                    <View style={[styles.taskDetailRow, { marginTop: 6 }]}>
-                      <Ionicons name="location-outline" size={14} color="#64748B" style={styles.detailIcon} />
-                      <Text style={styles.addressText} numberOfLines={2}>{cust.address}</Text>
-                    </View>
-                  ) : null}
-                </View>
-              );
-            })}
-          </View>
-        )}
-      </View>
+          <Text style={styles.openTasksLink}>View Tasks Module →</Text>
+        </View>
+      </TouchableOpacity>
 
       {/* ═════════════════════════════════════════════════════════════════════ */}
       {/* CARD 2: START RECOVERY (CLICKABLE → GOES DIRECTLY TO TRANSPORT SELECTION) */}
@@ -280,9 +225,29 @@ const styles = StyleSheet.create({
     shadowColor: '#0F172A', shadowOffset: { width: 0, height: 3 },
     shadowOpacity: 0.05, shadowRadius: 10, elevation: 3,
   },
+  cardTasks: { borderTopWidth: 4, borderTopColor: '#7C3AED' },
   cardAssigned: { borderTopWidth: 4, borderTopColor: '#2563EB' },
   cardStart: { borderTopWidth: 4, borderTopColor: '#059669' },
   cardProfile: { borderTopWidth: 4, borderTopColor: '#7C3AED' },
+  tasksSummaryRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 14,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9'
+  },
+  tasksSummaryPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F5F3FF',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8
+  },
+  tasksSummaryPillText: { fontSize: 12, fontWeight: '700', color: '#7C3AED' },
+  openTasksLink: { fontSize: 12, fontWeight: '700', color: '#7C3AED' },
   cardHeader: {
     flexDirection: 'row', justifyContent: 'space-between',
     alignItems: 'center',

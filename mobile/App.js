@@ -4,6 +4,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import LoginScreen from './src/screens/LoginScreen';
 import DashboardScreen from './src/screens/DashboardScreen';
+import TasksScreen from './src/screens/TasksScreen';
 import StartRecoveryScreen from './src/screens/StartRecoveryScreen';
 import ActiveRecoveryScreen from './src/screens/ActiveRecoveryScreen';
 import CompleteScreen from './src/screens/CompleteScreen';
@@ -24,10 +25,17 @@ export default function App() {
             options={{ headerShown: false }}
           />
 
-          {/* Main Dashboard (3 Cards: Assigned Tasks, Start Recovery, Profile) */}
+          {/* Main Dashboard (3 Cards: Tasks, Start Recovery, Profile) */}
           <Stack.Screen
             name="MainTabs"
             component={DashboardScreen}
+            options={{ headerShown: false }}
+          />
+
+          {/* Complete Tasks Management Module */}
+          <Stack.Screen
+            name="Tasks"
+            component={TasksScreen}
             options={{ headerShown: false }}
           />
 

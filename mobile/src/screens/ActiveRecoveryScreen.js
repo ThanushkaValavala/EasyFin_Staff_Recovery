@@ -508,6 +508,8 @@ export default function ActiveRecoveryScreen({ route, navigation }) {
       vehicleNumber: vehicleNumber || session?.vehicleNumber || '',
       startPhotoUri: route.params?.startPhotoUri || session?.startPhotoUri || null,
       allPoints: pathRef.current,
+      customer: route.params?.customer || session?.customer,
+      customerId: route.params?.customerId || session?.customerRefId || session?.customerId,
     });
   };
 
